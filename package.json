@@ -1,0 +1,34 @@
+{
+  "name": "beyondhub-quotes",
+  "version": "1.0.0",
+  "description": "Beyond Scrumptious quoting app on Cloudflare Workers",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc",
+    "db:migrate": "wrangler d1 migrations apply beyondhub-quotes --remote",
+    "db:migrate:local": "wrangler d1 migrations apply beyondhub-quotes --local"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BeyondScrumptiousDevelopment/beyondhub.git"
+  },
+  "bugs": {
+    "url": "https://github.com/BeyondScrumptiousDevelopment/beyondhub/issues"
+  },
+  "homepage": "https://github.com/BeyondScrumptiousDevelopment/beyondhub#readme",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.3.0",
+    "fflate": "^0.8.3",
+    "hono": "^4.13.16",
+    "jose": "^6.2.14",
+    "postal-mime": "^4.2.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261101.1",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.156.0"
+  },
+  "private": true,
+  "type": "module"
+}
