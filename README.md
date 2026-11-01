@@ -90,7 +90,7 @@ The app only accepts email sent directly from a `@beyondscrumptious.com` mailbox
 
 ## Using it
 
-1. Fill in **Settings** (VAT, deposit %, terms), then the **Price list**, then the **SOP**.
+1. The SOP, price list and settings come pre-loaded from the Cake and Dessert Stations SOPs (`migrations/0002_beyond_scrumptious_sop.sql`). Check **Settings** (VAT, deposit) and make any changes in the app from then on.
 2. In the WhatsApp Business app, open the chat → tap the contact's name (iPhone) or **⋮ → More** (Android) → **Export chat** → **Without media** → **Mail**, and send it to `quotes@in.beyondscrumptious.com`. Save that address as a contact so it's one tap.
 3. Within about a minute, the draft appears under **Inbox** and **Quotes**. Lines highlighted in yellow need a person to check them.
 4. Edit, **Save**, then **Print / PDF** or **Copy** the WhatsApp reply.
