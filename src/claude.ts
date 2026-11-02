@@ -14,6 +14,10 @@ export interface QuoteDraft {
   guests: number | null;
   summary: string;
   line_items: LineItem[];
+  /** Deposit as a percentage of the total, or null to use the default. */
+  deposit_percent: number | null;
+  /** A fixed deposit amount; when set it replaces the percentage. */
+  deposit_fixed_pence: number | null;
   questions: string[];
   client_notes: string;
   internal_notes: string;
@@ -27,7 +31,7 @@ const DRAFT_SCHEMA = {
   additionalProperties: false,
   required: [
     'client_name', 'client_phone', 'client_email', 'event_type', 'event_date', 'event_time',
-    'venue', 'guests', 'summary', 'line_items', 'questions', 'client_notes', 'internal_notes',
+    'venue', 'guests', 'summary', 'line_items', 'deposit_percent', 'deposit_fixed_pence', 'questions', 'client_notes', 'internal_notes',
     'reply_message',
   ],
   properties: {
@@ -63,6 +67,14 @@ const DRAFT_SCHEMA = {
         },
       },
     },
+    deposit_percent: {
+      anyOf: [{ type: 'number' }, { type: 'null' }],
+      description: 'Deposit as a % of the total per the SOP (100 = full payment up front), or null if the SOP sets none.',
+    },
+    deposit_fixed_pence: {
+      anyOf: [{ type: 'integer' }, { type: 'null' }],
+      description: 'A fixed deposit in pence when the SOP sets a fixed amount (replaces the percentage), otherwise null.',
+    },
     questions: { type: 'array', items: str, description: 'Information still needed from the client.' },
     client_notes: { ...str, description: 'Notes to print on the quote for the client.' },
     internal_notes: { ...str, description: 'Notes for staff only: assumptions made, SOP rules applied.' },
@@ -92,6 +104,14 @@ function formatPriceList(priceList: PriceItem[]): string {
   return active
     .map((p) => `id ${p.id} | ${p.category || 'General'} | ${p.name} | £${(p.price_pence / 100).toFixed(2)} / ${p.unit}${p.notes ? ` | ${p.notes}` : ''}`)
     .join('\n');
+}
+
+function optionalNumber(value: unknown, min: number, max: number, integer = false): number | null {
+  if (value === null || value === undefined) return null;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const clamped = Math.min(max, Math.max(min, n));
+  return integer ? Math.round(clamped) : clamped;
 }
 
 export async function draftQuote(
@@ -149,6 +169,8 @@ export async function draftQuote(
     guests: parsed.guests === null || !Number.isFinite(guests) ? null : Math.round(guests),
     summary: s('summary'),
     line_items: sanitiseLineItems(parsed.line_items),
+    deposit_percent: optionalNumber(parsed.deposit_percent, 0, 100),
+    deposit_fixed_pence: optionalNumber(parsed.deposit_fixed_pence, 0, Number.MAX_SAFE_INTEGER, true),
     questions: Array.isArray(parsed.questions) ? parsed.questions.map(String) : [],
     client_notes: s('client_notes'),
     internal_notes: s('internal_notes'),

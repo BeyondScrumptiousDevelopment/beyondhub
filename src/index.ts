@@ -20,8 +20,8 @@ const idParam = (v: string) => (/^\d+$/.test(v) ? Number(v) : NaN);
 function emptyDraft(): QuoteDraft {
   return {
     client_name: '', client_phone: '', client_email: '', event_type: '', event_date: '', event_time: '',
-    venue: '', guests: null, summary: '', line_items: [], questions: [], client_notes: '',
-    internal_notes: '', reply_message: '',
+    venue: '', guests: null, summary: '', line_items: [], deposit_percent: null, deposit_fixed_pence: null,
+    questions: [], client_notes: '', internal_notes: '', reply_message: '',
   };
 }
 
@@ -255,6 +255,10 @@ app.put('/api/quotes/:id', async (c) => {
     discount_pence: Math.max(0, Math.round(num(b.discount_pence))),
     vat_rate_percent: Math.min(100, Math.max(0, num(b.vat_rate_percent))),
     deposit_percent: Math.min(100, Math.max(0, num(b.deposit_percent))),
+    deposit_fixed_pence:
+      b.deposit_fixed_pence === null || b.deposit_fixed_pence === '' || b.deposit_fixed_pence === undefined
+        ? null
+        : Math.max(0, Math.round(num(b.deposit_fixed_pence))),
     client_notes: str(b.client_notes, 20_000),
     internal_notes: str(b.internal_notes, 20_000),
     questions: Array.isArray(b.questions) ? b.questions.slice(0, 50).map((q) => str(q, 500)) : [],

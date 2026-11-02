@@ -28,6 +28,7 @@ export interface QuoteRow {
   discount_pence: number;
   vat_rate_percent: number;
   deposit_percent: number;
+  deposit_fixed_pence: number | null;
   subtotal_pence: number;
   vat_pence: number;
   total_pence: number;
@@ -81,7 +82,9 @@ export async function createQuoteFromDraft(
 ): Promise<number> {
   const [settings, priceList] = await Promise.all([getSettings(db), getPriceList(db)]);
   const items = applyPriceList(draft.line_items, priceList);
-  const totals = computeTotals(items, 0, settings.vat_rate_percent, settings.deposit_percent);
+  // The SOP decides the deposit for each kind of order; fall back to the settings default.
+  const depositPercent = draft.deposit_percent ?? settings.deposit_percent;
+  const totals = computeTotals(items, 0, settings.vat_rate_percent, depositPercent, draft.deposit_fixed_pence);
 
   // Retry on the rare clash when two quotes are created at the same moment.
   for (let attempt = 0; ; attempt++) {
@@ -91,14 +94,14 @@ export async function createQuoteFromDraft(
         .prepare(
           `INSERT INTO quotes (reference, enquiry_id, client_name, client_phone, client_email, event_type,
             event_date, event_time, venue, guests, summary, line_items, vat_rate_percent, deposit_percent,
-            subtotal_pence, vat_pence, total_pence, client_notes, internal_notes, questions, reply_message,
+            deposit_fixed_pence, subtotal_pence, vat_pence, total_pence, client_notes, internal_notes, questions, reply_message,
             created_by, updated_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
         )
         .bind(
           reference, enquiryId, draft.client_name, draft.client_phone, draft.client_email, draft.event_type,
           draft.event_date, draft.event_time, draft.venue, draft.guests, draft.summary, JSON.stringify(items),
-          settings.vat_rate_percent, settings.deposit_percent, totals.subtotal_pence, totals.vat_pence,
+          settings.vat_rate_percent, depositPercent, draft.deposit_fixed_pence, totals.subtotal_pence, totals.vat_pence,
           totals.total_pence, draft.client_notes, draft.internal_notes, JSON.stringify(draft.questions),
           draft.reply_message, createdBy, createdBy,
         )
@@ -125,6 +128,7 @@ export interface QuoteUpdate {
   discount_pence: number;
   vat_rate_percent: number;
   deposit_percent: number;
+  deposit_fixed_pence: number | null;
   client_notes: string;
   internal_notes: string;
   questions: string[];
@@ -132,12 +136,12 @@ export interface QuoteUpdate {
 }
 
 export async function updateQuote(db: D1Database, id: number, q: QuoteUpdate, updatedBy: string): Promise<boolean> {
-  const totals = computeTotals(q.line_items, q.discount_pence, q.vat_rate_percent, q.deposit_percent);
+  const totals = computeTotals(q.line_items, q.discount_pence, q.vat_rate_percent, q.deposit_percent, q.deposit_fixed_pence);
   const result = await db
     .prepare(
       `UPDATE quotes SET status = ?, client_name = ?, client_phone = ?, client_email = ?, event_type = ?,
         event_date = ?, event_time = ?, venue = ?, guests = ?, summary = ?, line_items = ?, discount_pence = ?,
-        vat_rate_percent = ?, deposit_percent = ?, subtotal_pence = ?, vat_pence = ?, total_pence = ?,
+        vat_rate_percent = ?, deposit_percent = ?, deposit_fixed_pence = ?, subtotal_pence = ?, vat_pence = ?, total_pence = ?,
         client_notes = ?, internal_notes = ?, questions = ?, reply_message = ?, updated_by = ?,
         updated_at = datetime('now')
        WHERE id = ?`,
@@ -145,7 +149,7 @@ export async function updateQuote(db: D1Database, id: number, q: QuoteUpdate, up
     .bind(
       q.status, q.client_name, q.client_phone, q.client_email, q.event_type, q.event_date, q.event_time,
       q.venue, q.guests, q.summary, JSON.stringify(q.line_items), q.discount_pence, q.vat_rate_percent,
-      q.deposit_percent, totals.subtotal_pence, totals.vat_pence, totals.total_pence, q.client_notes,
+      q.deposit_percent, q.deposit_fixed_pence, totals.subtotal_pence, totals.vat_pence, totals.total_pence, q.client_notes,
       q.internal_notes, JSON.stringify(q.questions), q.reply_message, updatedBy, id,
     )
     .run();

@@ -32,6 +32,8 @@ export function computeTotals(
   discountPence: number,
   vatRatePercent: number,
   depositPercent: number,
+  /** A fixed deposit (e.g. £50 to secure a date); when set it replaces the percentage. */
+  depositFixedPence: number | null = null,
 ): Totals {
   const lines = items.reduce((sum, item) => sum + Math.round(item.quantity * item.unit_price_pence), 0);
   const subtotal = Math.max(0, lines - Math.max(0, discountPence));
@@ -41,7 +43,8 @@ export function computeTotals(
     subtotal_pence: subtotal,
     vat_pence: vat,
     total_pence: total,
-    deposit_pence: Math.round((total * depositPercent) / 100),
+    deposit_pence:
+      depositFixedPence !== null ? Math.min(depositFixedPence, total) : Math.round((total * depositPercent) / 100),
   };
 }
 

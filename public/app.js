@@ -58,12 +58,20 @@ function badge(status) {
 }
 
 // Computes the same totals as the server (src/pricing.ts) so the editor updates live.
-function computeTotals(items, discountPence, vatRate, depositPercent) {
+function computeTotals(items, discountPence, vatRate, depositPercent, depositFixedPence = null) {
   const lines = items.reduce((sum, i) => sum + Math.round(Number(i.quantity || 0) * Number(i.unit_price_pence || 0)), 0);
   const subtotal = Math.max(0, lines - Math.max(0, discountPence || 0));
   const vat = Math.round((subtotal * (vatRate || 0)) / 100);
   const total = subtotal + vat;
-  return { lines, subtotal, vat, total, deposit: Math.round((total * (depositPercent || 0)) / 100) };
+  const deposit = depositFixedPence !== null && depositFixedPence !== undefined
+    ? Math.min(depositFixedPence, total)
+    : Math.round((total * (depositPercent || 0)) / 100);
+  return { lines, subtotal, vat, total, deposit };
+}
+
+function depositLabel(t, depositPercent, fixed) {
+  if (t.deposit >= t.total) return 'Full payment to confirm the order';
+  return fixed !== null && fixed !== undefined ? 'Deposit to secure the date' : `Deposit to secure the date (${depositPercent}%)`;
 }
 
 // ---------- router ----------
@@ -297,6 +305,8 @@ async function renderQuote(id) {
             <label>Discount £<input id="discount" type="number" step="0.01" min="0" value="${toPounds(q.discount_pence)}"></label>
             <label>VAT %<input id="vat" type="number" step="0.1" min="0" value="${esc(q.vat_rate_percent)}"></label>
             <label>Deposit %<input id="deposit" type="number" step="1" min="0" value="${esc(q.deposit_percent)}"></label>
+            <label>…or fixed deposit £<input id="deposit-fixed" type="number" step="0.01" min="0" placeholder="Uses % if empty"
+              value="${q.deposit_fixed_pence === null ? '' : toPounds(q.deposit_fixed_pence)}"></label>
           </div>
           <div class="totals" id="totals"></div>
         </div>
@@ -335,16 +345,21 @@ async function renderQuote(id) {
     renderTotals();
   }
 
+  function fixedDeposit() {
+    const v = document.getElementById('deposit-fixed').value.trim();
+    return v === '' ? null : toPence(v);
+  }
+
   function renderTotals() {
     const t = computeTotals(items, toPence(document.getElementById('discount').value),
-      Number(document.getElementById('vat').value), Number(document.getElementById('deposit').value));
+      Number(document.getElementById('vat').value), Number(document.getElementById('deposit').value), fixedDeposit());
     document.getElementById('totals').innerHTML = `
       <div><span>Items</span><span>${money(t.lines)}</span></div>
       ${t.lines !== t.subtotal ? `<div><span>Discount</span><span>−${money(t.lines - t.subtotal)}</span></div>` : ''}
       <div><span>Subtotal</span><span>${money(t.subtotal)}</span></div>
       ${t.vat ? `<div><span>VAT</span><span>${money(t.vat)}</span></div>` : ''}
       <div class="grand"><span>Total</span><span>${money(t.total)}</span></div>
-      ${t.deposit ? `<div class="muted"><span>Deposit</span><span>${money(t.deposit)}</span></div>` : ''}`;
+      ${t.deposit ? `<div class="muted"><span>${esc(depositLabel(t, document.getElementById('deposit').value, fixedDeposit()))}</span><span>${money(t.deposit)}</span></div>` : ''}`;
     const flagged = items.filter((i) => i.needs_review).length;
     document.getElementById('review-warning').innerHTML = flagged
       ? `<div class="warn">${flagged} line${flagged > 1 ? 's need' : ' needs'} checking before this quote goes out (highlighted below).</div><br>`
@@ -393,7 +408,7 @@ async function renderQuote(id) {
     unsavedChanges = true;
     renderLines();
   });
-  ['discount', 'vat', 'deposit'].forEach((id) => document.getElementById(id).addEventListener('input', () => { unsavedChanges = true; renderTotals(); }));
+  ['discount', 'vat', 'deposit', 'deposit-fixed'].forEach((id) => document.getElementById(id).addEventListener('input', () => { unsavedChanges = true; renderTotals(); }));
   app.querySelectorAll('[data-field], #questions').forEach((el) => el.addEventListener('input', () => { unsavedChanges = true; }));
 
   function collect() {
@@ -404,6 +419,7 @@ async function renderQuote(id) {
     data.discount_pence = toPence(document.getElementById('discount').value);
     data.vat_rate_percent = Number(document.getElementById('vat').value);
     data.deposit_percent = Number(document.getElementById('deposit').value);
+    data.deposit_fixed_pence = fixedDeposit();
     data.questions = document.getElementById('questions').value.split('\n').map((s) => s.trim()).filter(Boolean);
     return data;
   }
@@ -443,7 +459,7 @@ async function renderQuote(id) {
 }
 
 function printableQuote(q, settings) {
-  const t = computeTotals(q.line_items, q.discount_pence, q.vat_rate_percent, q.deposit_percent);
+  const t = computeTotals(q.line_items, q.discount_pence, q.vat_rate_percent, q.deposit_percent, q.deposit_fixed_pence);
   const created = new Date();
   const validUntil = new Date(created.getTime() + settings.quote_valid_days * 86400000);
   const meta = [
@@ -465,7 +481,7 @@ function printableQuote(q, settings) {
       <div><span>Subtotal</span><span>${money(t.subtotal)}</span></div>
       ${t.vat ? `<div><span>VAT (${esc(q.vat_rate_percent)}%)</span><span>${money(t.vat)}</span></div>` : ''}
       <div class="grand"><span>Total</span><span>${money(t.total)}</span></div>
-      ${t.deposit ? `<div><span>Deposit to secure the date (${esc(q.deposit_percent)}%)</span><span>${money(t.deposit)}</span></div>` : ''}
+      ${t.deposit ? `<div><span>${esc(depositLabel(t, q.deposit_percent, q.deposit_fixed_pence))}</span><span>${money(t.deposit)}</span></div>` : ''}
     </div>
     ${q.client_notes ? `<h2>Notes</h2><p style="white-space:pre-wrap">${esc(q.client_notes)}</p>` : ''}
     ${settings.quote_terms ? `<h2>Terms</h2><p style="white-space:pre-wrap">${esc(settings.quote_terms)}</p>` : ''}`;
@@ -555,7 +571,7 @@ async function renderSettings() {
       <div class="grid">
         <label>Business name<input id="business_name" value="${esc(s.business_name)}"></label>
         <label>VAT % (0 if not VAT registered)<input id="vat_rate_percent" type="number" step="0.1" min="0" value="${esc(s.vat_rate_percent)}"></label>
-        <label>Deposit %<input id="deposit_percent" type="number" step="1" min="0" value="${esc(s.deposit_percent)}"></label>
+        <label>Default deposit % (when the SOP doesn't set one)<input id="deposit_percent" type="number" step="1" min="0" value="${esc(s.deposit_percent)}"></label>
         <label>Quote valid for (days)<input id="quote_valid_days" type="number" step="1" min="1" value="${esc(s.quote_valid_days)}"></label>
       </div><br>
       <label>Terms printed on every quote<textarea id="quote_terms" style="min-height:160px">${esc(s.quote_terms)}</textarea></label><br>
