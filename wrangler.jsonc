@@ -20,7 +20,7 @@
     {
       "binding": "DB",
       "database_name": "beyondhub-quotes",
-      "database_id": "REPLACE_WITH_ID_FROM_wrangler_d1_create",
+      "database_id": "e986323b-5abc-4667-8e92-653632024adf",
       "migrations_dir": "migrations"
     }
   ],
