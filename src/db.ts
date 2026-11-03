@@ -142,7 +142,8 @@ export async function updateQuote(db: D1Database, id: number, q: QuoteUpdate, up
   const totals = computeTotals(q.line_items, q.discount_pence, q.vat_rate_percent, q.deposit_percent, q.deposit_fixed_pence);
   const result = await db
     .prepare(
-      `UPDATE quotes SET status = ?, client_name = ?, client_phone = ?, client_email = ?, event_type = ?,
+      `UPDATE quotes SET status_changed_at = CASE WHEN status <> ? THEN datetime('now') ELSE status_changed_at END,
+        status = ?, client_name = ?, client_phone = ?, client_email = ?, event_type = ?,
         event_date = ?, event_time = ?, venue = ?, guests = ?, summary = ?, line_items = ?, discount_pence = ?,
         vat_rate_percent = ?, deposit_percent = ?, deposit_fixed_pence = ?, subtotal_pence = ?, vat_pence = ?, total_pence = ?,
         client_notes = ?, internal_notes = ?, questions = ?, reply_message = ?, updated_by = ?,
@@ -150,7 +151,7 @@ export async function updateQuote(db: D1Database, id: number, q: QuoteUpdate, up
        WHERE id = ?`,
     )
     .bind(
-      q.status, q.client_name, q.client_phone, q.client_email, q.event_type, q.event_date, q.event_time,
+      q.status, q.status, q.client_name, q.client_phone, q.client_email, q.event_type, q.event_date, q.event_time,
       q.venue, q.guests, q.summary, JSON.stringify(q.line_items), q.discount_pence, q.vat_rate_percent,
       q.deposit_percent, q.deposit_fixed_pence, totals.subtotal_pence, totals.vat_pence, totals.total_pence, q.client_notes,
       q.internal_notes, JSON.stringify(q.questions), q.reply_message, updatedBy, id,

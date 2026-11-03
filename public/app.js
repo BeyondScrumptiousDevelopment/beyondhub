@@ -78,6 +78,7 @@ function depositLabel(t, depositPercent, fixed) {
 // ---------- router ----------
 
 const routes = {
+  home: renderHome,
   quotes: renderQuotes,
   new: renderNewEnquiry,
   inbox: renderInbox,
@@ -93,12 +94,12 @@ let currentHash = location.hash;
 
 async function route() {
   currentHash = location.hash;
-  const [, name = 'quotes', id] = location.hash.split('?')[0].split('/');
+  const [, name = 'home', id] = location.hash.split('?')[0].split('/');
   document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.route === name));
   unsavedChanges = false;
   app.innerHTML = '<p class="muted">Loading…</p>';
   try {
-    await (routes[name] || renderQuotes)(id);
+    await (routes[name] || renderHome)(id);
   } catch (err) {
     app.innerHTML = `<div class="warn">${esc(err.message)}</div>`;
   }
@@ -113,8 +114,106 @@ window.addEventListener('hashchange', () => {
 });
 window.addEventListener('beforeunload', (e) => { if (unsavedChanges) e.preventDefault(); });
 
-api('/api/me').then((me) => { document.getElementById('me').textContent = me.email; }).catch(() => {});
+const mePromise = api('/api/me').catch(() => ({ email: '' }));
+mePromise.then((me) => { document.getElementById('me').textContent = me.email; });
 route();
+
+// ---------- home ----------
+
+function firstName(email) {
+  const local = String(email || '').split('@')[0].split(/[._-]/)[0];
+  return local ? local[0].toUpperCase() + local.slice(1) : '';
+}
+
+function greeting() {
+  const h = new Date().getHours();
+  return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
+}
+
+function shortDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso + 'T00:00:00');
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+}
+
+async function renderHome() {
+  const [me, d] = await Promise.all([mePromise, api('/api/dashboard')]);
+  const c = d.counts || {};
+  const n = (v) => Number(v || 0);
+  const name = firstName(me.email);
+  const today = new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long' });
+  const tile = (href, label, value, sub) =>
+    `<a class="tile" href="${href}"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></a>`;
+
+  app.innerHTML = `
+    <section class="hero">
+      <p class="hello">${greeting()}${name ? `, <em>${esc(name)}</em>` : ''}</p>
+      <p class="today">${esc(today)}</p>
+      <label for="quick-text" class="muted">Paste a WhatsApp chat or enquiry to draft a quote</label>
+      <textarea id="quick-text" placeholder="Paste the conversation here…"></textarea>
+      <div class="row">
+        <button id="quick-go" class="primary">Draft quote</button>
+        <a class="button" href="#/new">Upload an export instead</a>
+        <span id="quick-state" class="muted"></span>
+      </div>
+    </section>
+
+    <div class="tiles">
+      ${tile('#/quotes?status=draft', 'Needs checking', n(c.needs_checking), `${n(c.drafts)} draft${n(c.drafts) === 1 ? '' : 's'} in total`)}
+      ${tile('#/quotes?status=sent', 'Awaiting reply', n(c.awaiting_reply), 'quotes sent to clients')}
+      ${tile('#/quotes?status=accepted', 'Accepted this month', n(c.accepted_this_month), `${money(c.accepted_value_this_month)} booked`)}
+      ${tile('#/quotes?status=accepted', 'Events coming up', n(c.events_next_30_days), 'in the next 30 days')}
+    </div>
+
+    <div class="piping" aria-hidden="true"></div>
+
+    <div class="home-cols">
+      <section class="panel">
+        <h2>Coming up</h2>
+        ${d.upcoming.length ? d.upcoming.map((q) => `
+          <a class="list-row" href="#/quote/${q.id}">
+            <span class="when">${esc(shortDate(q.event_date))}</span>
+            <span class="what"><div>${esc(q.client_name) || 'Client'} · ${esc(q.event_type) || 'Event'}</div>
+              <div class="muted">${[q.event_time, q.venue, q.guests ? q.guests + ' guests' : ''].filter(Boolean).map(esc).join(' · ')}</div></span>
+            <span class="amount">${money(q.total_pence)}</span>
+          </a>`).join('') : '<p class="muted">No accepted bookings coming up yet.</p>'}
+      </section>
+      <section class="panel">
+        <h2>Needs your attention</h2>
+        ${d.failed.map((e) => `
+          <a class="list-row" href="#/enquiry/${e.id}">
+            <span class="what"><div>${esc(e.subject) || 'Enquiry'}</div><div class="muted">Couldn't draft: ${esc(e.error)}</div></span>
+            <span class="flag">Retry</span>
+          </a>`).join('')}
+        ${d.attention.length ? d.attention.map((q) => `
+          <a class="list-row" href="#/quote/${q.id}">
+            <span class="what"><div>${esc(q.client_name) || 'Unknown client'} · ${esc(q.reference)}</div>
+              <div class="muted">${q.status === 'sent' ? 'Sent, waiting for a reply' : 'Draft'}${q.event_date ? ' · ' + esc(shortDate(q.event_date)) : ''}</div></span>
+            ${q.needs_checking ? '<span class="flag">Check prices</span>' : `<span class="amount">${money(q.total_pence)}</span>`}
+          </a>`).join('') : (d.failed.length ? '' : '<p class="muted">All caught up.</p>')}
+      </section>
+    </div>`;
+
+  document.getElementById('quick-go').addEventListener('click', async (e) => {
+    const text = document.getElementById('quick-text').value.trim();
+    if (!text) { toast('Paste a conversation first.', true); return; }
+    const form = new FormData();
+    form.set('text', text);
+    e.target.disabled = true;
+    document.getElementById('quick-state').textContent = 'Reading the chat and drafting your quote…';
+    try {
+      const res = await api('/api/enquiries', { method: 'POST', body: form });
+      location.hash = `#/quote/${res.quote_id}`;
+    } catch (err) {
+      toast(err.message, true);
+      if (err.data && err.data.enquiry_id) location.hash = `#/enquiry/${err.data.enquiry_id}`;
+    } finally {
+      e.target.disabled = false;
+      const state = document.getElementById('quick-state');
+      if (state) state.textContent = '';
+    }
+  });
+}
 
 // ---------- quotes list ----------
 
@@ -135,6 +234,8 @@ async function renderQuotes() {
         <tbody id="rows"></tbody>
       </table></div>
     </div>`;
+  const wantedStatus = new URLSearchParams(location.hash.split('?')[1] || '').get('status');
+  if (wantedStatus) document.getElementById('status').value = wantedStatus;
   const load = async () => {
     const q = encodeURIComponent(document.getElementById('search').value);
     const status = encodeURIComponent(document.getElementById('status').value);
@@ -494,7 +595,7 @@ function printableQuote(q, settings) {
     ['Date', formatDate(q.event_date)], ['Time', q.event_time], ['Venue', q.venue], ['Guests', q.guests ?? ''],
   ].filter(([, v]) => v !== '' && v !== null);
   return `
-    <h1>${esc(settings.business_name)}</h1>
+    <img class="wordmark" src="/wordmark-navy.webp" alt="${esc(settings.business_name)}">
     <div class="row"><strong>Quote ${esc(q.reference)}</strong><span class="spacer"></span>
       <span>Issued ${esc(created.toLocaleDateString('en-GB'))} · valid until ${esc(validUntil.toLocaleDateString('en-GB'))}</span></div>
     <div class="meta">${meta.map(([k, v]) => `<div><strong>${k}:</strong> ${esc(v)}</div>`).join('')}</div>

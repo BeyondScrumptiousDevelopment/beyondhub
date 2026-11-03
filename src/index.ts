@@ -11,6 +11,11 @@ import { sanitiseLineItems } from './pricing';
 import * as freeagent from './freeagent';
 
 const app = new Hono<AppContext>();
+
+// The logo shown on the Cloudflare login page has to load before anyone signs in, so only
+// public/brand/ is served without the sign-in check. Keep nothing private in that folder.
+app.get('/brand/*', (c) => c.env.ASSETS.fetch(c.req.raw));
+
 app.use('*', requireStaff);
 
 // Changes must come from the app's own pages: browsers won't let another site add this header
@@ -76,6 +81,42 @@ app.onError((err, c) => {
 });
 
 app.get('/api/me', (c) => c.json({ email: c.get('userEmail'), domain: c.env.ALLOWED_DOMAIN }));
+
+// --- Home page ---------------------------------------------------------------
+
+app.get('/api/dashboard', async (c) => {
+  const db = c.env.DB;
+  const [counts, upcoming, attention, failed] = await db.batch([
+    db.prepare(
+      `SELECT
+         SUM(status = 'draft' AND line_items LIKE '%"needs_review":true%') AS needs_checking,
+         SUM(status = 'draft') AS drafts,
+         SUM(status = 'sent') AS awaiting_reply,
+         SUM(status = 'accepted' AND status_changed_at >= date('now', 'start of month')) AS accepted_this_month,
+         COALESCE(SUM(CASE WHEN status = 'accepted' AND status_changed_at >= date('now', 'start of month') THEN total_pence END), 0) AS accepted_value_this_month,
+         SUM(status = 'accepted' AND event_date BETWEEN date('now') AND date('now', '+30 days')) AS events_next_30_days
+       FROM quotes`,
+    ),
+    db.prepare(
+      `SELECT id, reference, client_name, event_type, event_date, event_time, venue, guests, total_pence
+       FROM quotes WHERE status = 'accepted' AND event_date >= date('now') ORDER BY event_date LIMIT 6`,
+    ),
+    db.prepare(
+      `SELECT id, reference, status, client_name, event_type, event_date, total_pence, updated_at,
+         line_items LIKE '%"needs_review":true%' AS needs_checking
+       FROM quotes WHERE status IN ('draft', 'sent') ORDER BY status = 'draft' DESC, updated_at DESC LIMIT 6`,
+    ),
+    db.prepare(
+      "SELECT id, subject, error, received_at FROM enquiries WHERE status = 'error' ORDER BY id DESC LIMIT 3",
+    ),
+  ]);
+  return c.json({
+    counts: counts.results[0],
+    upcoming: upcoming.results,
+    attention: attention.results,
+    failed: failed.results,
+  });
+});
 
 // --- SOP -----------------------------------------------------------------
 
