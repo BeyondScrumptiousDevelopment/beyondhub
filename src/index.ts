@@ -4,7 +4,7 @@ import { isAllowedEmail, requireStaff } from './auth';
 import { draftQuote, type QuoteDraft } from './claude';
 import { chatTextFromAttachment, parseInboundEmail } from './email';
 import {
-  QUOTE_STATUSES, createQuoteFromDraft, getPriceList, getSettings, getSop, updateQuote,
+  PAYMENT_RULES, QUOTE_STATUSES, createQuoteFromDraft, getPriceList, getSettings, getSop, updateQuote,
   type QuoteRow, type QuoteUpdate,
 } from './db';
 import { sanitiseLineItems } from './pricing';
@@ -86,7 +86,7 @@ app.get('/api/me', (c) => c.json({ email: c.get('userEmail'), domain: c.env.ALLO
 
 app.get('/api/dashboard', async (c) => {
   const db = c.env.DB;
-  const [counts, upcoming, attention, failed] = await db.batch([
+  const [counts, upcoming, attention, failed, payments] = await db.batch([
     db.prepare(
       `SELECT
          SUM(status = 'draft' AND line_items LIKE '%"needs_review":true%') AS needs_checking,
@@ -109,12 +109,18 @@ app.get('/api/dashboard', async (c) => {
     db.prepare(
       "SELECT id, subject, error, received_at FROM enquiries WHERE status = 'error' ORDER BY id DESC LIMIT 3",
     ),
+    db.prepare(
+      `SELECT id, reference, client_name, final_payment_due, total_pence FROM quotes
+       WHERE status = 'accepted' AND final_payment_due BETWEEN date('now') AND date('now', '+14 days')
+       ORDER BY final_payment_due LIMIT 6`,
+    ),
   ]);
   return c.json({
     counts: counts.results[0],
     upcoming: upcoming.results,
     attention: attention.results,
     failed: failed.results,
+    payments_due: payments.results,
   });
 });
 
@@ -314,6 +320,8 @@ app.put('/api/quotes/:id', async (c) => {
     internal_notes: str(b.internal_notes, 20_000),
     questions: Array.isArray(b.questions) ? b.questions.slice(0, 50).map((q) => str(q, 500)) : [],
     reply_message: str(b.reply_message, 20_000),
+    final_payment_due: /^\d{4}-\d{2}-\d{2}$/.test(str(b.final_payment_due, 10)) ? str(b.final_payment_due, 10) : '',
+    payment_rule: (PAYMENT_RULES as readonly string[]).includes(str(b.payment_rule, 20)) ? str(b.payment_rule, 20) : '',
   };
   const ok = await updateQuote(c.env.DB, idParam(c.req.param('id')), update, c.get('userEmail'));
   return ok ? c.json({ ok: true }) : c.json({ error: 'Not found' }, 404);
@@ -326,7 +334,7 @@ app.post('/api/quotes/:id/duplicate', async (c) => {
   const source = quoteToJson(row);
   const id = await createQuoteFromDraft(c.env.DB, null, emptyDraft(), by);
   // Copy everything except the reference and status; prices are kept as they were on the original.
-  await updateQuote(c.env.DB, id, { ...source, status: 'draft' }, by);
+  await updateQuote(c.env.DB, id, { ...source, status: 'draft', payment_rule: source.payment_rule ?? '' }, by);
   return c.json({ id }, 201);
 });
 

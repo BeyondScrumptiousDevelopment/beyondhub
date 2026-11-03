@@ -41,6 +41,8 @@ export interface QuoteRow {
   freeagent_status: string | null;
   freeagent_url: string | null;
   freeagent_sent_at: string | null;
+  final_payment_due: string;
+  payment_rule: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -136,7 +138,12 @@ export interface QuoteUpdate {
   internal_notes: string;
   questions: string[];
   reply_message: string;
+  final_payment_due: string;
+  payment_rule: string;
 }
+
+/** '' means nobody has picked one yet, so the app suggests a rule from the quote's lines. */
+export const PAYMENT_RULES = ['', 'none', 'pancake', 'cake', 'custom'] as const;
 
 export async function updateQuote(db: D1Database, id: number, q: QuoteUpdate, updatedBy: string): Promise<boolean> {
   const totals = computeTotals(q.line_items, q.discount_pence, q.vat_rate_percent, q.deposit_percent, q.deposit_fixed_pence);
@@ -146,7 +153,7 @@ export async function updateQuote(db: D1Database, id: number, q: QuoteUpdate, up
         status = ?, client_name = ?, client_phone = ?, client_email = ?, event_type = ?,
         event_date = ?, event_time = ?, venue = ?, guests = ?, summary = ?, line_items = ?, discount_pence = ?,
         vat_rate_percent = ?, deposit_percent = ?, deposit_fixed_pence = ?, subtotal_pence = ?, vat_pence = ?, total_pence = ?,
-        client_notes = ?, internal_notes = ?, questions = ?, reply_message = ?, updated_by = ?,
+        client_notes = ?, internal_notes = ?, questions = ?, reply_message = ?, final_payment_due = ?, payment_rule = ?, updated_by = ?,
         updated_at = datetime('now')
        WHERE id = ?`,
     )
@@ -154,7 +161,7 @@ export async function updateQuote(db: D1Database, id: number, q: QuoteUpdate, up
       q.status, q.status, q.client_name, q.client_phone, q.client_email, q.event_type, q.event_date, q.event_time,
       q.venue, q.guests, q.summary, JSON.stringify(q.line_items), q.discount_pence, q.vat_rate_percent,
       q.deposit_percent, q.deposit_fixed_pence, totals.subtotal_pence, totals.vat_pence, totals.total_pence, q.client_notes,
-      q.internal_notes, JSON.stringify(q.questions), q.reply_message, updatedBy, id,
+      q.internal_notes, JSON.stringify(q.questions), q.reply_message, q.final_payment_due, q.payment_rule, updatedBy, id,
     )
     .run();
   return result.meta.changes > 0;

@@ -198,6 +198,7 @@ function estimateComments(q: QuoteRow): string {
     q.event_time && `Time: ${q.event_time}`,
     q.venue && `Venue: ${q.venue}`,
     q.guests && `Guests: ${q.guests}`,
+    q.final_payment_due && `Final payment due: ${q.final_payment_due}`,
   ].filter(Boolean);
   return [details.join('\n'), q.client_notes].filter((s) => s && String(s).trim()).join('\n\n');
 }

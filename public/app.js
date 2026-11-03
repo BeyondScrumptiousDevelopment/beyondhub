@@ -75,6 +75,70 @@ function depositLabel(t, depositPercent, fixed) {
   return fixed !== null && fixed !== undefined ? 'Deposit to secure the date' : `Deposit to secure the date (${depositPercent}%)`;
 }
 
+// ---------- payment dates ----------
+
+const PAYMENT_RULES = {
+  none: 'No set rule',
+  pancake: 'Pancake Station: 1 month before the event',
+  cake: 'Cake: 1 week before collection',
+  custom: 'Custom date',
+};
+
+function isoToday() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function parseIso(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || '');
+  return m ? { y: Number(m[1]), m: Number(m[2]) - 1, d: Number(m[3]) } : null;
+}
+
+function toIso(y, m, d) {
+  const date = new Date(Date.UTC(y, m, d));
+  return date.toISOString().slice(0, 10);
+}
+
+/** Same day of the month, n months away; 31 March minus a month is 28/29 February, not 3 March. */
+function addMonths(iso, n) {
+  const p = parseIso(iso);
+  if (!p) return '';
+  const target = new Date(Date.UTC(p.y, p.m + n, 1));
+  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+  return toIso(target.getUTCFullYear(), target.getUTCMonth(), Math.min(p.d, lastDay));
+}
+
+function addDays(iso, n) {
+  const p = parseIso(iso);
+  return p ? toIso(p.y, p.m, p.d + n) : '';
+}
+
+function daysBetween(fromIso, toIsoDate) {
+  const a = parseIso(fromIso);
+  const b = parseIso(toIsoDate);
+  if (!a || !b) return null;
+  return Math.round((Date.UTC(b.y, b.m, b.d) - Date.UTC(a.y, a.m, a.d)) / 86400000);
+}
+
+function detectPaymentRule(items) {
+  const text = items.map((i) => i.description).join(' ');
+  if (/pancake station/i.test(text)) return 'pancake';
+  if (/\bcake\b/i.test(text)) return 'cake';
+  return 'none';
+}
+
+function dueDateFromRule(rule, eventDate) {
+  if (rule === 'pancake') return addMonths(eventDate, -1);
+  if (rule === 'cake') return addDays(eventDate, -7);
+  return '';
+}
+
+function longDate(iso) {
+  const p = parseIso(iso);
+  if (!p) return '';
+  return new Date(Date.UTC(p.y, p.m, p.d)).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+}
+
 // ---------- router ----------
 
 const routes = {
@@ -180,6 +244,12 @@ async function renderHome() {
       </section>
       <section class="panel">
         <h2>Needs your attention</h2>
+        ${(d.payments_due || []).map((q) => `
+          <a class="list-row" href="#/quote/${q.id}">
+            <span class="what"><div>${esc(q.client_name) || 'Client'} · ${esc(q.reference)}</div>
+              <div class="muted">Final payment due ${esc(shortDate(q.final_payment_due))}</div></span>
+            <span class="flag">Payment due</span>
+          </a>`).join('')}
         ${d.failed.map((e) => `
           <a class="list-row" href="#/enquiry/${e.id}">
             <span class="what"><div>${esc(e.subject) || 'Enquiry'}</div><div class="muted">Couldn't draft: ${esc(e.error)}</div></span>
@@ -190,7 +260,7 @@ async function renderHome() {
             <span class="what"><div>${esc(q.client_name) || 'Unknown client'} · ${esc(q.reference)}</div>
               <div class="muted">${q.status === 'sent' ? 'Sent, waiting for a reply' : 'Draft'}${q.event_date ? ' · ' + esc(shortDate(q.event_date)) : ''}</div></span>
             ${q.needs_checking ? '<span class="flag">Check prices</span>' : `<span class="amount">${money(q.total_pence)}</span>`}
-          </a>`).join('') : (d.failed.length ? '' : '<p class="muted">All caught up.</p>')}
+          </a>`).join('') : (d.failed.length || (d.payments_due || []).length ? '' : '<p class="muted">All caught up.</p>')}
       </section>
     </div>`;
 
@@ -420,6 +490,17 @@ async function renderQuote(id) {
       </div>
 
       <div class="panel">
+        <h2 style="margin-top:0">Payment dates</h2>
+        <div class="grid">
+          <label>Final payment rule<select id="pay-rule">${Object.entries(PAYMENT_RULES)
+            .map(([value, label]) => `<option value="${value}">${esc(label)}</option>`).join('')}</select></label>
+          <label>Final payment due<input id="pay-due" type="date"></label>
+          <label>Invoice issue date<input id="pay-issue" type="date" value="${isoToday()}"></label>
+        </div>
+        <div id="pay-result" style="margin-top:12px"></div>
+      </div>
+
+      <div class="panel">
         <h2 style="margin-top:0">Still to ask the client</h2>
         <textarea id="questions" placeholder="One question per line">${esc((q.questions || []).join('\n'))}</textarea>
         <h2>Notes on the quote (client sees these)</h2>
@@ -457,6 +538,48 @@ async function renderQuote(id) {
     return v === '' ? null : toPence(v);
   }
 
+  const payRule = document.getElementById('pay-rule');
+  const payDue = document.getElementById('pay-due');
+  const payIssue = document.getElementById('pay-issue');
+  const eventDateInput = app.querySelector('[data-field="event_date"]');
+  // Until someone picks a rule, suggest one from what's on the quote.
+  payRule.value = q.payment_rule || detectPaymentRule(items);
+  payDue.value = q.final_payment_due || dueDateFromRule(payRule.value, q.event_date);
+
+  function refreshDueDate() {
+    if (payRule.value !== 'custom') payDue.value = dueDateFromRule(payRule.value, eventDateInput.value);
+    renderTotals();
+  }
+  payRule.addEventListener('change', () => { unsavedChanges = true; refreshDueDate(); });
+  eventDateInput.addEventListener('change', refreshDueDate);
+  payDue.addEventListener('input', () => { unsavedChanges = true; payRule.value = 'custom'; renderTotals(); });
+  payIssue.addEventListener('input', () => renderTotals());
+
+  function renderPayment(t) {
+    const out = document.getElementById('pay-result');
+    const due = payDue.value;
+    if (!due) {
+      out.innerHTML = `<p class="muted">${payRule.value !== 'none' && !eventDateInput.value ? 'Add the event date to work out the final payment date.' : 'Choose a rule, or set the final payment date yourself.'}</p>`;
+      return;
+    }
+    const balance = t.total - (t.deposit < t.total ? t.deposit : 0);
+    const days = daysBetween(payIssue.value, due);
+    const terms = days === null ? null : Math.max(0, days);
+    out.innerHTML = `
+      <div class="row" style="align-items:center">
+        <div><div class="muted">Payment terms to enter in FreeAgent</div>
+          <div style="font: 400 30px/1.1 var(--font-head)">${terms === null ? '–' : `${terms} day${terms === 1 ? '' : 's'}`}</div></div>
+        ${terms === null ? '' : '<button id="copy-terms">Copy</button>'}
+      </div>
+      <p style="margin:8px 0 0">${t.deposit && t.deposit < t.total ? 'Balance' : 'Payment'} of <strong>${money(balance)}</strong> due on <strong>${esc(longDate(due))}</strong>,
+        counted from an invoice issued on ${esc(longDate(payIssue.value))}.</p>
+      ${days !== null && days < 0 ? '<div class="warn" style="margin-top:8px">That due date is before the invoice date, so enter 0 days (due on receipt).</div>' : ''}`;
+    const copy = document.getElementById('copy-terms');
+    if (copy) copy.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(String(terms)); toast(`Copied ${terms}`); } catch { toast('Copy failed: type it in instead', true); }
+    });
+  }
+
   function renderTotals() {
     const t = computeTotals(items, toPence(document.getElementById('discount').value),
       Number(document.getElementById('vat').value), Number(document.getElementById('deposit').value), fixedDeposit());
@@ -467,6 +590,7 @@ async function renderQuote(id) {
       ${t.vat ? `<div><span>VAT</span><span>${money(t.vat)}</span></div>` : ''}
       <div class="grand"><span>Total</span><span>${money(t.total)}</span></div>
       ${t.deposit ? `<div class="muted"><span>${esc(depositLabel(t, document.getElementById('deposit').value, fixedDeposit()))}</span><span>${money(t.deposit)}</span></div>` : ''}`;
+    renderPayment(t);
     const flagged = items.filter((i) => i.needs_review).length;
     document.getElementById('review-warning').innerHTML = flagged
       ? `<div class="warn">${flagged} line${flagged > 1 ? 's need' : ' needs'} checking before this quote goes out (highlighted below).</div><br>`
@@ -527,6 +651,8 @@ async function renderQuote(id) {
     data.vat_rate_percent = Number(document.getElementById('vat').value);
     data.deposit_percent = Number(document.getElementById('deposit').value);
     data.deposit_fixed_pence = fixedDeposit();
+    data.payment_rule = payRule.value;
+    data.final_payment_due = payDue.value;
     data.questions = document.getElementById('questions').value.split('\n').map((s) => s.trim()).filter(Boolean);
     return data;
   }
@@ -610,6 +736,7 @@ function printableQuote(q, settings) {
       ${t.vat ? `<div><span>VAT (${esc(q.vat_rate_percent)}%)</span><span>${money(t.vat)}</span></div>` : ''}
       <div class="grand"><span>Total</span><span>${money(t.total)}</span></div>
       ${t.deposit ? `<div><span>${esc(depositLabel(t, q.deposit_percent, q.deposit_fixed_pence))}</span><span>${money(t.deposit)}</span></div>` : ''}
+      ${q.final_payment_due && t.deposit < t.total ? `<div><span>${t.deposit ? 'Balance' : 'Payment'} due by ${esc(formatDate(q.final_payment_due))}</span><span>${money(t.total - t.deposit)}</span></div>` : ''}
     </div>
     ${q.client_notes ? `<h2>Notes</h2><p style="white-space:pre-wrap">${esc(q.client_notes)}</p>` : ''}
     ${settings.quote_terms ? `<h2>Terms</h2><p style="white-space:pre-wrap">${esc(settings.quote_terms)}</p>` : ''}`;
