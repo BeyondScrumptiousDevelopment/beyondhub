@@ -8,6 +8,8 @@
   // Keep the *.workers.dev URL off so nobody can go around the login.
   "workers_dev": false,
   "preview_urls": false,
+  // Keep variables added in the Cloudflare dashboard when deploying from GitHub.
+  "keep_vars": true,
   "routes": [
     { "pattern": "quotes.beyondscrumptious.com", "custom_domain": true }
   ],
