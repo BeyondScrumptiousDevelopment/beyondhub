@@ -109,6 +109,16 @@ npx wrangler secret put FREEAGENT_CLIENT_SECRET
 
 The app can do whatever the FreeAgent user who clicked Allow can do, but it only ever reads contacts and creates contacts and estimates. To cut access off, click **Disconnect** in Settings, or revoke the app in FreeAgent.
 
+### Deploying updates without a terminal
+
+Connect the Worker to GitHub once, in **Workers & Pages → beyondhub-quotes → Settings → Build → Connect**:
+
+- **Branch:** the branch you deploy from
+- **Build command:** leave empty
+- **Deploy command:** `npx wrangler d1 migrations apply beyondhub-quotes --remote && npx wrangler deploy`
+
+After that, every push to that branch applies any new database migrations and deploys. Secrets can be added in the dashboard under **Settings → Variables and Secrets** (type **Secret**).
+
 ## Using it
 
 1. The SOP, price list and settings come pre-loaded from the Cake and Dessert Stations SOPs (`migrations/0002_beyond_scrumptious_sop.sql`). Check **Settings** (VAT, deposit) and make any changes in the app from then on.
