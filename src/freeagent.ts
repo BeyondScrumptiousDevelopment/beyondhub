@@ -86,7 +86,8 @@ export async function connectionStatus(env: Env) {
   const row = await env.DB.prepare(
     "SELECT connected_by, connected_at, company_subdomain FROM integrations WHERE id = 'freeagent' AND refresh_token IS NOT NULL",
   ).first<{ connected_by: string; connected_at: string; company_subdomain: string }>();
-  return { configured: isConfigured(env), connected: Boolean(row), ...row };
+  const missing = (['FREEAGENT_CLIENT_ID', 'FREEAGENT_CLIENT_SECRET'] as const).filter((name) => !env[name]);
+  return { configured: isConfigured(env), missing, connected: Boolean(row), ...row };
 }
 
 export async function disconnect(env: Env): Promise<void> {

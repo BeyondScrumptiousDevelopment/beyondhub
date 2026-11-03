@@ -609,7 +609,8 @@ async function renderSettings() {
     <h2>FreeAgent</h2>
     <div class="panel">
       ${faMessage ? `<div class="warn">${faMessage === 'connected' ? 'FreeAgent is connected.' : 'FreeAgent: ' + esc(faMessage)}</div><br>` : ''}
-      ${!fa.configured ? '<p class="muted">Not set up yet. Add the FreeAgent app ID and secret (see the README), then come back here to connect.</p>'
+      ${!fa.configured ? `<p class="muted">Not set up yet. The app can't see: <strong>${esc((fa.missing || []).join(', '))}</strong>.
+            Add ${fa.missing && fa.missing.length > 1 ? 'them' : 'it'} in Cloudflare under Workers &amp; Pages → beyondhub-quotes → Settings → Variables and Secrets (not the Build settings), as type Secret.</p>`
         : fa.connected ? `<p>Connected by ${esc(fa.connected_by)} on ${esc(formatDate(fa.connected_at))}${fa.company_subdomain ? ` (${esc(fa.company_subdomain)}.freeagent.com)` : ''}.</p>
             <p class="muted">Accepted quotes show a "Send to FreeAgent" button.</p>
             <button id="fa-disconnect" class="danger">Disconnect</button>`
