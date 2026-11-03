@@ -62,7 +62,7 @@ button, .button {
   font: inherit; cursor: pointer; border-radius: 6px; padding: 7px 14px;
   border: 1px solid var(--border); background: var(--panel); color: var(--text); text-decoration: none; display: inline-block;
 }
-button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+button.primary, .button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 button.danger { color: var(--danger); }
 button:disabled { opacity: .55; cursor: wait; }
 table { width: 100%; border-collapse: collapse; }

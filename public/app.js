@@ -37,7 +37,8 @@ function toast(message, isError = false) {
 }
 
 async function api(path, options = {}) {
-  const init = { ...options, headers: { ...(options.headers || {}) } };
+  // The server rejects changes without this header, which other websites can't add.
+  const init = { ...options, headers: { 'X-Requested-With': 'beyondhub', ...(options.headers || {}) } };
   if (options.json !== undefined) {
     init.body = JSON.stringify(options.json);
     init.headers['Content-Type'] = 'application/json';
@@ -92,7 +93,7 @@ let currentHash = location.hash;
 
 async function route() {
   currentHash = location.hash;
-  const [, name = 'quotes', id] = location.hash.split('/');
+  const [, name = 'quotes', id] = location.hash.split('?')[0].split('/');
   document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.route === name));
   unsavedChanges = false;
   app.innerHTML = '<p class="muted">Loading…</p>';
@@ -252,7 +253,9 @@ async function renderEnquiry(id) {
 // ---------- quote editor ----------
 
 async function renderQuote(id) {
-  const [quote, prices, settings] = await Promise.all([api(`/api/quotes/${id}`), api('/api/prices'), api('/api/settings')]);
+  const [quote, prices, settings, fa] = await Promise.all([
+    api(`/api/quotes/${id}`), api('/api/prices'), api('/api/settings'), api('/api/freeagent/status'),
+  ]);
   const activePrices = prices.filter((p) => p.active);
   const q = quote;
 
@@ -267,12 +270,15 @@ async function renderQuote(id) {
           .map((s) => `<option ${s === q.status ? 'selected' : ''}>${s}</option>`).join('')}</select>
         <span class="spacer"></span>
         ${q.enquiry_id ? `<a class="button" href="#/enquiry/${q.enquiry_id}">View enquiry</a>` : ''}
+        ${q.freeagent_url ? `<a class="button" href="${esc(q.freeagent_url)}" target="_blank" rel="noopener">Open in FreeAgent</a>` : ''}
+        ${fa.connected && !q.freeagent_status ? `<button id="freeagent" ${q.status === 'accepted' ? '' : 'disabled'} title="For accepted quotes">Send to FreeAgent</button>` : ''}
         <button id="print">Print / PDF</button>
         <button id="duplicate">Duplicate</button>
         <button id="delete" class="danger">Delete</button>
         <button id="save" class="primary">Save</button>
       </div>
-      <p class="muted">Created by ${esc(q.created_by)} · last saved ${esc(formatDate(q.updated_at))} by ${esc(q.updated_by)}</p>
+      <p class="muted">Created by ${esc(q.created_by)} · last saved ${esc(formatDate(q.updated_at))} by ${esc(q.updated_by)}
+        ${q.freeagent_sent_at ? ` · sent to FreeAgent ${esc(formatDate(q.freeagent_sent_at))}. Later edits here don't update FreeAgent.` : ''}</p>
 
       <div id="review-warning"></div>
 
@@ -448,6 +454,27 @@ async function renderQuote(id) {
     const text = app.querySelector('[data-field="reply_message"]').value;
     try { await navigator.clipboard.writeText(text); toast('Copied – paste it into WhatsApp'); } catch { toast('Copy failed: select the text and copy it manually', true); }
   });
+  const faButton = document.getElementById('freeagent');
+  app.querySelector('[data-field="status"]').addEventListener('change', (e) => {
+    if (faButton) faButton.disabled = e.target.value !== 'accepted';
+  });
+  if (faButton) faButton.addEventListener('click', async () => {
+    if (unsavedChanges || collect().status !== q.status) await save();
+    if (collect().status !== 'accepted') { toast('Set the status to accepted first.', true); return; }
+    if (items.some((i) => i.needs_review)) { toast('Some lines still need checking. Mark them as checked first.', true); return; }
+    if (!confirm(`Create ${q.reference} as an approved quote in FreeAgent? Nothing is emailed to the client.`)) return;
+    faButton.disabled = true;
+    faButton.textContent = 'Sending…';
+    try {
+      const res = await api(`/api/quotes/${id}/freeagent`, { method: 'POST' });
+      toast('Created in FreeAgent');
+      route();
+      if (res.url) window.open(res.url, '_blank', 'noopener');
+    } catch (err) {
+      toast(err.message, true);
+      route();
+    }
+  });
   document.getElementById('print').addEventListener('click', () => {
     const data = collect();
     if (items.some((i) => i.needs_review) && !confirm('Some lines still need checking. Print anyway?')) return;
@@ -564,7 +591,8 @@ async function renderPrices() {
 // ---------- settings ----------
 
 async function renderSettings() {
-  const s = await api('/api/settings');
+  const [s, fa] = await Promise.all([api('/api/settings'), api('/api/freeagent/status')]);
+  const faMessage = new URLSearchParams(location.hash.split('?')[1] || '').get('freeagent');
   app.innerHTML = `
     <h1>Settings</h1>
     <div class="panel">
@@ -577,7 +605,23 @@ async function renderSettings() {
       <label>Terms printed on every quote<textarea id="quote_terms" style="min-height:160px">${esc(s.quote_terms)}</textarea></label><br>
       <p class="muted">VAT and deposit changes apply to new quotes; existing quotes keep their own values.</p>
       <button id="save" class="primary">Save settings</button>
+    </div>
+    <h2>FreeAgent</h2>
+    <div class="panel">
+      ${faMessage ? `<div class="warn">${faMessage === 'connected' ? 'FreeAgent is connected.' : 'FreeAgent: ' + esc(faMessage)}</div><br>` : ''}
+      ${!fa.configured ? '<p class="muted">Not set up yet. Add the FreeAgent app ID and secret (see the README), then come back here to connect.</p>'
+        : fa.connected ? `<p>Connected by ${esc(fa.connected_by)} on ${esc(formatDate(fa.connected_at))}${fa.company_subdomain ? ` (${esc(fa.company_subdomain)}.freeagent.com)` : ''}.</p>
+            <p class="muted">Accepted quotes show a "Send to FreeAgent" button.</p>
+            <button id="fa-disconnect" class="danger">Disconnect</button>`
+        : '<p class="muted">Click Connect, sign in to FreeAgent and click Allow. You only need to do this once.</p><a class="button primary" href="/api/freeagent/connect">Connect FreeAgent</a>'}
     </div>`;
+  const disconnect = document.getElementById('fa-disconnect');
+  if (disconnect) disconnect.addEventListener('click', async () => {
+    if (!confirm('Disconnect FreeAgent? You can reconnect any time.')) return;
+    await api('/api/freeagent/disconnect', { method: 'POST' });
+    location.hash = '#/settings';
+    route();
+  });
   document.getElementById('save').addEventListener('click', async () => {
     const v = (id) => document.getElementById(id).value;
     await api('/api/settings', { method: 'PUT', json: {

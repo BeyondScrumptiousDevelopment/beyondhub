@@ -38,6 +38,9 @@ export interface QuoteRow {
   reply_message: string;
   created_by: string | null;
   updated_by: string | null;
+  freeagent_status: string | null;
+  freeagent_url: string | null;
+  freeagent_sent_at: string | null;
   created_at: string;
   updated_at: string;
 }

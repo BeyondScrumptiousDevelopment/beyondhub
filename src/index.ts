@@ -8,9 +8,19 @@ import {
   type QuoteRow, type QuoteUpdate,
 } from './db';
 import { sanitiseLineItems } from './pricing';
+import * as freeagent from './freeagent';
 
 const app = new Hono<AppContext>();
 app.use('*', requireStaff);
+
+// Changes must come from the app's own pages: browsers won't let another site add this header
+// without a CORS preflight, which this Worker never approves.
+app.use('/api/*', async (c, next) => {
+  if (c.req.method !== 'GET' && c.req.header('X-Requested-With') !== 'beyondhub') {
+    return c.json({ error: 'Missing request header' }, 403);
+  }
+  await next();
+});
 
 const MAX_TEXT = 200_000;
 const str = (v: unknown, max = 5000) => String(v ?? '').slice(0, max);
@@ -282,6 +292,66 @@ app.post('/api/quotes/:id/duplicate', async (c) => {
 app.delete('/api/quotes/:id', async (c) => {
   await c.env.DB.prepare('DELETE FROM quotes WHERE id = ?').bind(idParam(c.req.param('id'))).run();
   return c.json({ ok: true });
+});
+
+// --- FreeAgent ------------------------------------------------------------------
+
+const freeagentCallback = (c: { req: { url: string } }) => `${new URL(c.req.url).origin}/api/freeagent/callback`;
+
+app.get('/api/freeagent/status', async (c) => c.json(await freeagent.connectionStatus(c.env)));
+
+// Plain links (not fetch calls): the browser goes to FreeAgent and comes back here.
+app.get('/api/freeagent/connect', async (c) => {
+  if (!freeagent.isConfigured(c.env)) return c.text('Add the FreeAgent app ID and secret first (see README).', 400);
+  return c.redirect(await freeagent.authoriseUrl(c.env, freeagentCallback(c)));
+});
+
+app.get('/api/freeagent/callback', async (c) => {
+  const error = c.req.query('error');
+  const code = c.req.query('code');
+  if (error || !code) return c.redirect(`/#/settings?freeagent=${encodeURIComponent(error || 'cancelled')}`);
+  try {
+    await freeagent.completeConnection(c.env, code, str(c.req.query('state'), 100), freeagentCallback(c), c.get('userEmail'));
+    return c.redirect('/#/settings?freeagent=connected');
+  } catch (err) {
+    console.error(err);
+    return c.redirect(`/#/settings?freeagent=${encodeURIComponent(err instanceof Error ? err.message : 'failed')}`);
+  }
+});
+
+app.post('/api/freeagent/disconnect', async (c) => {
+  await freeagent.disconnect(c.env);
+  return c.json({ ok: true });
+});
+
+app.post('/api/quotes/:id/freeagent', async (c) => {
+  const id = idParam(c.req.param('id'));
+  // Claim the quote first so a double click can't create two estimates.
+  const claim = await c.env.DB.prepare(
+    "UPDATE quotes SET freeagent_status = 'sending' WHERE id = ? AND status = 'accepted' AND freeagent_status IS NULL",
+  )
+    .bind(id)
+    .run();
+  if (!claim.meta.changes) {
+    return c.json({ error: 'Only accepted quotes that haven\'t been sent to FreeAgent yet can be sent.' }, 409);
+  }
+  let created = false;
+  try {
+    const row = await c.env.DB.prepare('SELECT * FROM quotes WHERE id = ?').bind(id).first<QuoteRow>();
+    const sent = await freeagent.sendQuote(c.env, row!, async (estimate) => {
+      created = true;
+      await c.env.DB.prepare(
+        "UPDATE quotes SET freeagent_status = 'sent', freeagent_url = ?, freeagent_sent_at = datetime('now') WHERE id = ?",
+      )
+        .bind(estimate.web_url || estimate.api_url, id)
+        .run();
+    });
+    return c.json({ url: sent.web_url || sent.api_url });
+  } catch (err) {
+    // Only release the quote if nothing was created in FreeAgent, so retrying can't make a duplicate.
+    if (!created) await c.env.DB.prepare('UPDATE quotes SET freeagent_status = NULL WHERE id = ?').bind(id).run();
+    throw err;
+  }
 });
 
 app.all('/api/*', (c) => c.json({ error: 'Not found' }, 404));

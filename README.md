@@ -88,6 +88,27 @@ Your main domain's email stays with Google. The app uses a subdomain so the two 
 
 The app only accepts email sent directly from a `@beyondscrumptious.com` mailbox. Email from anyone else is bounced. Send from your own Workspace account, not through a forwarding alias or group, because forwarding changes the sender.
 
+### 5. FreeAgent (optional)
+
+This adds a **Send to FreeAgent** button to accepted quotes. It creates the quote in FreeAgent as an approved estimate, with the client's contact, every line and the event details. Nothing is emailed to the client.
+
+1. Go to [dev.freeagent.com](https://dev.freeagent.com), sign in with your FreeAgent login and create an app:
+   - **Name:** `Beyond Scrumptious Quotes`
+   - **OAuth redirect URI:** `https://quotes.beyondscrumptious.com/api/freeagent/callback`
+2. Copy the app's **OAuth identifier** and **OAuth secret**, and store them:
+
+```bash
+npx wrangler secret put FREEAGENT_CLIENT_ID
+```
+
+```bash
+npx wrangler secret put FREEAGENT_CLIENT_SECRET
+```
+
+3. In the app, go to **Settings → Connect FreeAgent**, sign in and click **Allow**. You only do this once.
+
+The app can do whatever the FreeAgent user who clicked Allow can do, but it only ever reads contacts and creates contacts and estimates. To cut access off, click **Disconnect** in Settings, or revoke the app in FreeAgent.
+
 ## Using it
 
 1. The SOP, price list and settings come pre-loaded from the Cake and Dessert Stations SOPs (`migrations/0002_beyond_scrumptious_sop.sql`). Check **Settings** (VAT, deposit) and make any changes in the app from then on.
