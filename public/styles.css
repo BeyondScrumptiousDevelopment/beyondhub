@@ -105,20 +105,7 @@ td input, td select { padding: 5px 7px; }
 .toast.error { background: var(--danger); color: #fff; }
 pre.raw { white-space: pre-wrap; word-break: break-word; max-height: 400px; overflow: auto; font-size: 13px; background: var(--bg); padding: 10px; border-radius: 6px; }
 .table-wrap { overflow-x: auto; }
-.print-only { display: none; }
 
-/* Printable quote: use the browser's "Save as PDF". */
-.doc { color: #111; background: #fff; font-size: 13px; }
-.doc h1 { font-size: 24px; margin-bottom: 4px; }
-.doc table th, .doc table td { border-bottom: 1px solid #ddd; }
-.doc .meta { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 24px; margin: 16px 0; }
-@page { margin: 15mm; }
-@media print {
-  body { background: #fff; }
-  .no-print, .topbar, .editor { display: none !important; }
-  .print-only { display: block; }
-  main { padding: 0; max-width: none; }
-}
 @media (max-width: 640px) {
   .totals { min-width: 0; width: 100%; }
   /* Menu becomes one scrollable row under the title and email, instead of a tall stack. */
@@ -170,6 +157,3 @@ pre.raw { white-space: pre-wrap; word-break: break-word; max-height: 400px; over
   .hero::after { width: 70px; height: 140px; }
   .hero .hello { font-size: 26px; }
 }
-/* Printed quotes always use the light brand colours. */
-.doc { color: var(--navy); font-family: var(--font-body); }
-.doc .wordmark { height: 46px; width: auto; display: block; margin-bottom: 6px; }

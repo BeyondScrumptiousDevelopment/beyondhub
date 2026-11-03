@@ -443,7 +443,7 @@ async function renderQuote(id) {
         ${q.enquiry_id ? `<a class="button" href="#/enquiry/${q.enquiry_id}">View enquiry</a>` : ''}
         ${q.freeagent_url ? `<a class="button" href="${esc(q.freeagent_url)}" target="_blank" rel="noopener">Open in FreeAgent</a>` : ''}
         ${fa.connected && !q.freeagent_status ? `<button id="freeagent" ${q.status === 'accepted' ? '' : 'disabled'} title="For accepted quotes">Send to FreeAgent</button>` : ''}
-        <button id="print">Print / PDF</button>
+        <button id="pdf">Download PDF</button>
         <button id="duplicate">Duplicate</button>
         <button id="delete" class="danger">Delete</button>
         <button id="save" class="primary">Save</button>
@@ -514,7 +514,7 @@ async function renderQuote(id) {
         <textarea data-field="reply_message" style="min-height:200px">${esc(q.reply_message)}</textarea>
       </div>
     </div>
-    <div class="print-only doc" id="doc"></div>`;
+`;
 
   const items = (q.line_items || []).map((i) => ({ ...i }));
 
@@ -702,44 +702,205 @@ async function renderQuote(id) {
       route();
     }
   });
-  document.getElementById('print').addEventListener('click', () => {
-    const data = collect();
-    if (items.some((i) => i.needs_review) && !confirm('Some lines still need checking. Print anyway?')) return;
-    document.getElementById('doc').innerHTML = printableQuote(data, settings);
-    window.print();
+  document.getElementById('pdf').addEventListener('click', async (e) => {
+    if (items.some((i) => i.needs_review) && !confirm('Some lines still need checking. Download anyway?')) return;
+    e.target.disabled = true;
+    try {
+      await downloadQuotePdf(collect(), settings);
+    } catch (err) {
+      toast(`Couldn't make the PDF: ${err.message}`, true);
+    } finally {
+      e.target.disabled = false;
+    }
   });
 
   renderLines();
 }
 
-function printableQuote(q, settings) {
+// ---------- PDF quote ----------
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const el = document.createElement('script');
+    el.src = src;
+    el.onload = resolve;
+    el.onerror = () => reject(new Error(`couldn't load ${src}`));
+    document.head.appendChild(el);
+  });
+}
+
+let pdfLibrary;
+/** The PDF library is large, so it's only fetched the first time someone downloads a quote. */
+function loadPdfLibrary() {
+  pdfLibrary = pdfLibrary || loadScript('/vendor/jspdf.umd.min.js').then(() => loadScript('/vendor/jspdf.plugin.autotable.min.js'));
+  return pdfLibrary.catch((err) => { pdfLibrary = null; throw err; });
+}
+
+async function imageDataUrl(src) {
+  const blob = await (await fetch(src)).blob();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+// The PDF's built-in fonts only cover Western European characters; anything else would print as junk.
+function pdfText(value) {
+  return String(value ?? '')
+    .replace(/[−]/g, '-')
+    .replace(/[^\x09\x0a\x0d\x20-\x7e -ÿ–—‘’“”•…€£·]/g, '');
+}
+
+function safeFileName(s) {
+  return String(s || '').replace(/[\\/:*?"<>|]+/g, '').replace(/\s+/g, ' ').trim();
+}
+
+async function downloadQuotePdf(q, settings) {
+  await loadPdfLibrary();
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+  const NAVY = [25, 37, 63];
+  const SLATE = [63, 84, 120];
+  const TINT = [197, 215, 236];
+  const MIST = [243, 248, 251];
+  const SURFACE = [216, 232, 244];
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const M = 16;
   const t = computeTotals(q.line_items, q.discount_pence, q.vat_rate_percent, q.deposit_percent, q.deposit_fixed_pence);
-  const created = new Date();
-  const validUntil = new Date(created.getTime() + settings.quote_valid_days * 86400000);
-  const meta = [
-    ['Client', q.client_name], ['Phone', q.client_phone], ['Email', q.client_email], ['Event', q.event_type],
-    ['Date', formatDate(q.event_date)], ['Time', q.event_time], ['Venue', q.venue], ['Guests', q.guests ?? ''],
-  ].filter(([, v]) => v !== '' && v !== null);
-  return `
-    <img class="wordmark" src="/wordmark-navy.webp" alt="${esc(settings.business_name)}">
-    <div class="row"><strong>Quote ${esc(q.reference)}</strong><span class="spacer"></span>
-      <span>Issued ${esc(created.toLocaleDateString('en-GB'))} · valid until ${esc(validUntil.toLocaleDateString('en-GB'))}</span></div>
-    <div class="meta">${meta.map(([k, v]) => `<div><strong>${k}:</strong> ${esc(v)}</div>`).join('')}</div>
-    <table>
-      <thead><tr><th>Item</th><th class="num">Qty</th><th class="num">Unit price</th><th class="num">Total</th></tr></thead>
-      <tbody>${q.line_items.map((i) => `<tr><td>${esc(i.description)}</td><td class="num">${esc(i.quantity)} ${esc(i.unit)}</td>
-        <td class="num">${money(i.unit_price_pence)}</td><td class="num">${money(Math.round(i.quantity * i.unit_price_pence))}</td></tr>`).join('')}</tbody>
-    </table>
-    <div class="totals" style="margin-top:12px;max-width:320px">
-      ${t.lines !== t.subtotal ? `<div><span>Discount</span><span>−${money(t.lines - t.subtotal)}</span></div>` : ''}
-      <div><span>Subtotal</span><span>${money(t.subtotal)}</span></div>
-      ${t.vat ? `<div><span>VAT (${esc(q.vat_rate_percent)}%)</span><span>${money(t.vat)}</span></div>` : ''}
-      <div class="grand"><span>Total</span><span>${money(t.total)}</span></div>
-      ${t.deposit ? `<div><span>${esc(depositLabel(t, q.deposit_percent, q.deposit_fixed_pence))}</span><span>${money(t.deposit)}</span></div>` : ''}
-      ${q.final_payment_due && t.deposit < t.total ? `<div><span>${t.deposit ? 'Balance' : 'Payment'} due by ${esc(formatDate(q.final_payment_due))}</span><span>${money(t.total - t.deposit)}</span></div>` : ''}
-    </div>
-    ${q.client_notes ? `<h2>Notes</h2><p style="white-space:pre-wrap">${esc(q.client_notes)}</p>` : ''}
-    ${settings.quote_terms ? `<h2>Terms</h2><p style="white-space:pre-wrap">${esc(settings.quote_terms)}</p>` : ''}`;
+  const issued = isoToday();
+  const validUntil = addDays(issued, Number(settings.quote_valid_days) || 7);
+
+  // Header band with the wordmark.
+  doc.setFillColor(...SURFACE);
+  doc.rect(0, 0, pageW, 38, 'F');
+  const logo = await imageDataUrl('/brand/wordmark-navy.png');
+  const props = doc.getImageProperties(logo);
+  const logoW = 72;
+  doc.addImage(logo, 'PNG', M, 12, logoW, (logoW * props.height) / props.width, 'wordmark', 'FAST');
+  doc.setTextColor(...NAVY);
+  doc.setFont('times', 'normal');
+  doc.setFontSize(20);
+  doc.text('QUOTE', pageW - M, 18, { align: 'right' });
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9.5);
+  doc.setTextColor(...SLATE);
+  doc.text(pdfText(q.reference), pageW - M, 24, { align: 'right' });
+  doc.text(`Issued ${formatDate(issued)}  ·  valid until ${formatDate(validUntil)}`, pageW - M, 29, { align: 'right' });
+
+  // Client and event details, in two columns.
+  let y = 50;
+  const details = [
+    ['Client', q.client_name], ['Event', q.event_type], ['Phone', q.client_phone], ['Date', formatDate(q.event_date)],
+    ['Email', q.client_email], ['Time', q.event_time], ['Venue', q.venue], ['Guests', q.guests ?? ''],
+  ].filter(([, v]) => v !== '' && v !== null && v !== undefined);
+  const colW = (pageW - 2 * M) / 2;
+  details.forEach(([label, value], i) => {
+    const x = M + (i % 2) * colW;
+    const rowY = y + Math.floor(i / 2) * 7;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+    doc.setTextColor(...SLATE);
+    doc.text(label.toUpperCase(), x, rowY);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    doc.setTextColor(...NAVY);
+    doc.text(doc.splitTextToSize(pdfText(value), colW - 24)[0] || '', x + 20, rowY);
+  });
+  y += Math.ceil(details.length / 2) * 7 + 4;
+
+  // Line items.
+  window.autoTable(doc, {
+    startY: y,
+    margin: { left: M, right: M },
+    head: [['Item', 'Qty', 'Unit price', 'Total']],
+    body: q.line_items.map((i) => [
+      pdfText(i.description),
+      pdfText(`${i.quantity}${i.unit && i.unit !== 'each' ? ' ' + i.unit : ''}`),
+      money(i.unit_price_pence),
+      money(Math.round(i.quantity * i.unit_price_pence)),
+    ]),
+    theme: 'plain',
+    styles: { font: 'helvetica', fontSize: 9.5, textColor: NAVY, cellPadding: { top: 2.6, bottom: 2.6, left: 3, right: 3 } },
+    headStyles: { fillColor: NAVY, textColor: MIST, fontStyle: 'bold', fontSize: 8.5 },
+    alternateRowStyles: { fillColor: MIST },
+    columnStyles: { 1: { halign: 'right', cellWidth: 30 }, 2: { halign: 'right', cellWidth: 30 }, 3: { halign: 'right', cellWidth: 30 } },
+    didParseCell: (data) => { if (data.section === 'head' && data.column.index > 0) data.cell.styles.halign = 'right'; },
+  });
+  y = doc.lastAutoTable.finalY + 8;
+
+  // Totals, right-aligned.
+  const rows = [];
+  if (t.lines !== t.subtotal) rows.push(['Discount', '-' + money(t.lines - t.subtotal)]);
+  rows.push(['Subtotal', money(t.subtotal)]);
+  if (t.vat) rows.push([`VAT (${q.vat_rate_percent}%)`, money(t.vat)]);
+  rows.push(['Total', money(t.total), 'grand']);
+  if (t.deposit) rows.push([depositLabel(t, q.deposit_percent, q.deposit_fixed_pence), money(t.deposit)]);
+  if (q.final_payment_due && t.deposit < t.total) {
+    rows.push([`${t.deposit ? 'Balance' : 'Payment'} due by ${formatDate(q.final_payment_due)}`, money(t.total - t.deposit)]);
+  }
+  const labelX = pageW - M - 80;
+  const ensureSpace = (needed) => {
+    if (y + needed > pageH - 22) { doc.addPage(); y = M + 6; }
+  };
+  ensureSpace(rows.length * 7 + 6);
+  rows.forEach(([label, value, kind]) => {
+    if (kind === 'grand') {
+      doc.setDrawColor(...TINT);
+      doc.line(labelX, y - 4.5, pageW - M, y - 4.5);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(12);
+    } else {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9.5);
+    }
+    doc.setTextColor(...NAVY);
+    doc.text(pdfText(label), labelX, y);
+    doc.text(value, pageW - M, y, { align: 'right' });
+    y += kind === 'grand' ? 8 : 6;
+  });
+  y += 4;
+
+  // Notes and terms.
+  const section = (title, body) => {
+    if (!String(body || '').trim()) return;
+    const lines = doc.setFont('helvetica', 'normal').setFontSize(9.5).splitTextToSize(pdfText(body), pageW - 2 * M);
+    ensureSpace(12);
+    doc.setFont('times', 'normal');
+    doc.setFontSize(13);
+    doc.setTextColor(...NAVY);
+    doc.text(title, M, y);
+    y += 6;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9.5);
+    doc.setTextColor(...SLATE);
+    lines.forEach((line) => {
+      ensureSpace(5);
+      doc.text(line, M, y);
+      y += 4.6;
+    });
+    y += 4;
+  };
+  section('Notes', q.client_notes);
+  section('Terms', settings.quote_terms);
+
+  // Footer on every page.
+  const pages = doc.getNumberOfPages();
+  for (let i = 1; i <= pages; i++) {
+    doc.setPage(i);
+    doc.setDrawColor(...TINT);
+    doc.line(M, pageH - 14, pageW - M, pageH - 14);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(...SLATE);
+    doc.text(pdfText(`${settings.business_name}  ·  beyondscrumptious.com`), M, pageH - 9);
+    if (pages > 1) doc.text(`Page ${i} of ${pages}`, pageW - M, pageH - 9, { align: 'right' });
+  }
+
+  doc.setProperties({ title: `${settings.business_name} quote ${q.reference}`, author: settings.business_name });
+  doc.save(safeFileName(`${settings.business_name} Quote ${q.reference}${q.client_name ? ' - ' + q.client_name : ''}`) + '.pdf');
 }
 
 // ---------- SOP ----------
