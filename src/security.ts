@@ -40,7 +40,9 @@ export const securityHeaders: MiddlewareHandler<AppContext> = async (c, next) =>
   res.headers.set('X-Frame-Options', 'DENY');
   res.headers.set('Referrer-Policy', 'same-origin');
   res.headers.set('Cross-Origin-Opener-Policy', 'same-origin');
-  res.headers.set('Cross-Origin-Resource-Policy', 'same-origin');
+  // The public logo is shown on the Cloudflare login page, which is on another address.
+  const isPublicLogo = new URL(c.req.url).pathname.startsWith('/brand/');
+  res.headers.set('Cross-Origin-Resource-Policy', isPublicLogo ? 'cross-origin' : 'same-origin');
   res.headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
   // Client details must not be kept in shared or browser caches.
   if (new URL(c.req.url).pathname.startsWith('/api/')) res.headers.set('Cache-Control', 'no-store');
