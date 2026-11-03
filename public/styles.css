@@ -105,4 +105,9 @@ pre.raw { white-space: pre-wrap; word-break: break-word; max-height: 400px; over
 }
 @media (max-width: 640px) {
   .totals { min-width: 0; width: 100%; }
+  /* Menu becomes one scrollable row under the title and email, instead of a tall stack. */
+  .topbar { gap: 8px; padding: 8px 16px; }
+  #me { margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
+  nav { order: 3; flex: 0 0 100%; flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  nav a { white-space: nowrap; }
 }
