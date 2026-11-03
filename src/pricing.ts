@@ -48,7 +48,12 @@ export function computeTotals(
   };
 }
 
-/** Coerces untrusted JSON (from the browser or the model) into well-formed line items. */
+const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
+
+/**
+ * Coerces untrusted JSON (from the browser or the model) into well-formed line items. Negative
+ * values are allowed for discount-style lines; the caps stop a typo becoming a £1bn quote.
+ */
 export function sanitiseLineItems(value: unknown): LineItem[] {
   if (!Array.isArray(value)) return [];
   return value.slice(0, 200).map((raw) => {
@@ -58,9 +63,9 @@ export function sanitiseLineItems(value: unknown): LineItem[] {
     const priceItemId = Number(item.price_item_id);
     return {
       description: String(item.description ?? '').slice(0, 500),
-      quantity: Number.isFinite(quantity) ? quantity : 0,
+      quantity: Number.isFinite(quantity) ? clamp(quantity, -100_000, 100_000) : 0,
       unit: String(item.unit ?? '').slice(0, 50),
-      unit_price_pence: Number.isFinite(price) ? Math.round(price) : 0,
+      unit_price_pence: Number.isFinite(price) ? Math.round(clamp(price, -100_000_000, 100_000_000)) : 0,
       price_item_id: Number.isInteger(priceItemId) && priceItemId > 0 ? priceItemId : null,
       needs_review: Boolean(item.needs_review),
       review_reason: String(item.review_reason ?? '').slice(0, 500),

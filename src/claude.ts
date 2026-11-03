@@ -2,6 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { Env } from './env';
 import type { LineItem, PriceItem } from './pricing';
 import { sanitiseLineItems } from './pricing';
+import { UserError } from './security';
 
 export interface QuoteDraft {
   client_name: string;
@@ -121,38 +122,58 @@ export async function draftQuote(
   priceList: PriceItem[],
   enquiry: string,
 ): Promise<QuoteDraft> {
-  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
-  const response = await client.beta.messages
-    .stream({
-      model: env.CLAUDE_MODEL || 'claude-sonnet-5-5',
-      max_tokens: 32000,
-      betas: ['server-side-fallback-2026-07-01'],
-      fallbacks: 'default',
-      thinking: { type: 'adaptive' },
-      output_config: { effort: 'medium', format: { type: 'json_schema', schema: DRAFT_SCHEMA } },
-      system: [
-        // The SOP and price list change rarely, so cache them across drafts.
-        { type: 'text', text: systemPrompt(businessName) },
-        {
-          type: 'text',
-          text: `<sop>\n${sop}\n</sop>\n\n<price_list>\n${formatPriceList(priceList)}\n</price_list>`,
-          cache_control: { type: 'ephemeral' },
-        },
-      ],
-      messages: [
-        {
-          role: 'user',
-          content: `Today's date is ${new Date().toISOString().slice(0, 10)}. Draft a quote for this enquiry.\n\n<enquiry>\n${enquiry}\n</enquiry>`,
-        },
-      ],
-    })
-    .finalMessage();
+  // The address is fixed so a stray environment variable can't send the API key elsewhere;
+  // a test server is only allowed during local development.
+  const baseURL = env.DEV_USER_EMAIL && env.ANTHROPIC_BASE_URL ? env.ANTHROPIC_BASE_URL : 'https://api.anthropic.com';
+  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, baseURL });
+  let response;
+  try {
+    response = await client.beta.messages
+      .stream({
+        model: env.CLAUDE_MODEL || 'claude-sonnet-5-5',
+        max_tokens: 32000,
+        betas: ['server-side-fallback-2026-07-01'],
+        fallbacks: 'default',
+        thinking: { type: 'adaptive' },
+        output_config: { effort: 'medium', format: { type: 'json_schema', schema: DRAFT_SCHEMA } },
+        system: [
+          // The SOP and price list change rarely, so cache them across drafts.
+          { type: 'text', text: systemPrompt(businessName) },
+          {
+            type: 'text',
+            text: `<sop>\n${sop}\n</sop>\n\n<price_list>\n${formatPriceList(priceList)}\n</price_list>`,
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+        messages: [
+          {
+            role: 'user',
+            content: `Today's date is ${new Date().toISOString().slice(0, 10)}. Draft a quote for this enquiry.\n\n<enquiry>\n${enquiry}\n</enquiry>`,
+          },
+        ],
+      })
+      .finalMessage();
+  } catch (err) {
+    if (err instanceof Anthropic.AuthenticationError || err instanceof Anthropic.PermissionDeniedError) {
+      throw new UserError('The Claude API key was refused. Check ANTHROPIC_API_KEY in Cloudflare.', 502);
+    }
+    if (err instanceof Anthropic.RateLimitError) {
+      throw new UserError('Claude is busy or the monthly spend limit has been reached. Try again shortly, or check your Anthropic console.', 502);
+    }
+    if (err instanceof Anthropic.BadRequestError && /credit|billing/i.test(err.message)) {
+      throw new UserError('Your Claude API credit has run out. Top it up at console.anthropic.com.', 502);
+    }
+    if (err instanceof Anthropic.APIError || err instanceof Anthropic.APIConnectionError) {
+      throw new UserError('Claude could not be reached just now. Try again in a minute.', 502);
+    }
+    throw err;
+  }
 
   if (response.stop_reason === 'refusal') {
-    throw new Error('Claude declined to draft this quote. Draft it by hand instead.');
+    throw new UserError('Claude declined to draft this quote. Draft it by hand instead.');
   }
   if (response.stop_reason === 'max_tokens') {
-    throw new Error('The enquiry was too long to draft in one go. Try pasting only the relevant part.');
+    throw new UserError('The enquiry was too long to draft in one go. Try pasting only the relevant part.');
   }
   const text = response.content.flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('');
   const parsed = JSON.parse(text) as Record<string, unknown>;

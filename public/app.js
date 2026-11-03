@@ -179,7 +179,11 @@ window.addEventListener('hashchange', () => {
 window.addEventListener('beforeunload', (e) => { if (unsavedChanges) e.preventDefault(); });
 
 const mePromise = api('/api/me').catch(() => ({ email: '' }));
-mePromise.then((me) => { document.getElementById('me').textContent = me.email; });
+mePromise.then((me) => {
+  document.getElementById('me').textContent = me.email;
+  // Hides admin-only buttons; the server refuses those actions for everyone else regardless.
+  document.body.classList.toggle('not-admin', me.is_admin === false);
+});
 route();
 
 // ---------- home ----------
@@ -314,7 +318,7 @@ async function renderQuotes() {
       ? rows.map((r) => `
         <tr class="clickable" data-id="${r.id}">
           <td>${esc(r.reference)}</td><td>${esc(r.client_name) || '<span class="muted">Unknown</span>'}</td>
-          <td>${esc(r.event_type)}${r.guests ? ` · ${r.guests} guests` : ''}</td>
+          <td>${esc(r.event_type)}${r.guests ? ` · ${esc(r.guests)} guests` : ''}</td>
           <td>${esc(formatDate(r.event_date))}</td><td class="num">${money(r.total_pence)}</td>
           <td>${badge(r.status)}</td><td class="muted">${esc(formatDate(r.updated_at))}</td>
         </tr>`).join('')
@@ -399,7 +403,7 @@ async function renderEnquiry(id) {
       <pre class="raw">${esc(e.raw_text)}</pre>
       <div class="row">
         <button id="draft" class="primary">${e.status === 'drafted' ? 'Draft another quote' : 'Draft quote'}</button>
-        <button id="delete" class="danger">Delete enquiry</button>
+        <button id="delete" class="danger admin-only">Delete enquiry</button>
         <span id="state" class="muted"></span>
       </div>
     </div>`;
@@ -441,11 +445,11 @@ async function renderQuote(id) {
           .map((s) => `<option ${s === q.status ? 'selected' : ''}>${s}</option>`).join('')}</select>
         <span class="spacer"></span>
         ${q.enquiry_id ? `<a class="button" href="#/enquiry/${q.enquiry_id}">View enquiry</a>` : ''}
-        ${q.freeagent_url ? `<a class="button" href="${esc(q.freeagent_url)}" target="_blank" rel="noopener">Open in FreeAgent</a>` : ''}
+        ${/^https:\/\/[a-z0-9-]+\.freeagent\.com\//.test(q.freeagent_url || '') ? `<a class="button" href="${esc(q.freeagent_url)}" target="_blank" rel="noopener noreferrer">Open in FreeAgent</a>` : ''}
         ${fa.connected && !q.freeagent_status ? `<button id="freeagent" ${q.status === 'accepted' ? '' : 'disabled'} title="For accepted quotes">Send to FreeAgent</button>` : ''}
         <button id="pdf">Download PDF</button>
         <button id="duplicate">Duplicate</button>
-        <button id="delete" class="danger">Delete</button>
+        <button id="delete" class="danger admin-only">Delete</button>
         <button id="save" class="primary">Save</button>
       </div>
       <p class="muted">Created by ${esc(q.created_by)} · last saved ${esc(formatDate(q.updated_at))} by ${esc(q.updated_by)}
@@ -908,14 +912,15 @@ async function downloadQuotePdf(q, settings) {
 async function renderSop() {
   const [sop, history] = await Promise.all([api('/api/sop'), api('/api/sop/history')]);
   app.innerHTML = `
-    <div class="row"><h1>Quoting SOP</h1><span class="spacer"></span><button id="save" class="primary">Save SOP</button></div>
+    <div class="row"><h1>Quoting SOP</h1><span class="spacer"></span><button id="save" class="primary admin-only">Save SOP</button></div>
+    <p class="admin-note">Only admins can change the SOP.</p>
     <p class="muted">Claude follows this when drafting every quote. Prices belong in the <a href="#/prices">Price list</a>.
       Last saved ${esc(formatDate(sop.updated_at))}${sop.updated_by ? ' by ' + esc(sop.updated_by) : ''}.</p>
     <div class="panel"><textarea id="content" class="tall" style="min-height:60vh">${esc(sop.content)}</textarea></div>
     <h2>Previous versions</h2>
     <div class="panel">${history.length ? `<table><tbody>${history.map((h) => `
       <tr><td>${esc(formatDate(h.updated_at))}</td><td>${esc(h.updated_by)}</td>
-      <td class="num"><button data-id="${h.id}">Load into editor</button></td></tr>`).join('')}</tbody></table>`
+      <td class="num"><button data-id="${h.id}" class="admin-only">Load into editor</button></td></tr>`).join('')}</tbody></table>`
       : '<p class="muted">No earlier versions yet.</p>'}</div>`;
   const content = document.getElementById('content');
   content.addEventListener('input', () => { unsavedChanges = true; });
@@ -945,11 +950,12 @@ async function renderPrices() {
       <td><input data-k="unit" value="${esc(p.unit)}" placeholder="per person" style="width:110px"></td>
       <td class="num"><input data-k="price" type="number" step="0.01" min="0" value="${toPounds(p.price_pence)}" style="width:100px"></td>
       <td><input data-k="notes" value="${esc(p.notes)}" placeholder="Rules, minimums…"></td>
-      <td class="num" style="white-space:nowrap"><button data-act="save">Save</button>
-        ${p.id ? (p.active ? '<button data-act="archive" class="danger">Archive</button>' : '<button data-act="restore">Restore</button>') : ''}</td>
+      <td class="num" style="white-space:nowrap"><button data-act="save" class="admin-only">Save</button>
+        ${p.id ? (p.active ? '<button data-act="archive" class="danger admin-only">Archive</button>' : '<button data-act="restore" class="admin-only">Restore</button>') : ''}</td>
     </tr>`;
   app.innerHTML = `
-    <div class="row"><h1>Price list</h1><span class="spacer"></span><button id="add" class="primary">Add item</button></div>
+    <div class="row"><h1>Price list</h1><span class="spacer"></span><button id="add" class="primary admin-only">Add item</button></div>
+    <p class="admin-note">Only admins can change prices.</p>
     <p class="muted">Claude can only quote prices from this list. Anything else is flagged for you to price. Archived items stay on old quotes but aren't offered again.</p>
     <div class="panel"><div class="table-wrap"><table>
       <thead><tr><th>Category</th><th>Item</th><th>Unit</th><th class="num">Price £</th><th>Notes</th><th></th></tr></thead>
@@ -993,7 +999,8 @@ async function renderSettings() {
       </div><br>
       <label>Terms printed on every quote<textarea id="quote_terms" style="min-height:160px">${esc(s.quote_terms)}</textarea></label><br>
       <p class="muted">VAT and deposit changes apply to new quotes; existing quotes keep their own values.</p>
-      <button id="save" class="primary">Save settings</button>
+      <button id="save" class="primary admin-only">Save settings</button>
+      <p class="admin-note">Only admins can change settings.</p>
     </div>
     <h2>FreeAgent</h2>
     <div class="panel">
@@ -1002,8 +1009,8 @@ async function renderSettings() {
             Add ${fa.missing && fa.missing.length > 1 ? 'them' : 'it'} in Cloudflare under Workers &amp; Pages → beyondhub-quotes → Settings → Variables and Secrets (not the Build settings), as type Secret.</p>`
         : fa.connected ? `<p>Connected by ${esc(fa.connected_by)} on ${esc(formatDate(fa.connected_at))}${fa.company_subdomain ? ` (${esc(fa.company_subdomain)}.freeagent.com)` : ''}.</p>
             <p class="muted">Accepted quotes show a "Send to FreeAgent" button.</p>
-            <button id="fa-disconnect" class="danger">Disconnect</button>`
-        : '<p class="muted">Click Connect, sign in to FreeAgent and click Allow. You only need to do this once.</p><a class="button primary" href="/api/freeagent/connect">Connect FreeAgent</a>'}
+            <button id="fa-disconnect" class="danger admin-only">Disconnect</button>`
+        : '<p class="muted">Click Connect, sign in to FreeAgent and click Allow. You only need to do this once.</p><a class="button primary admin-only" href="/api/freeagent/connect">Connect FreeAgent</a>'}
     </div>`;
   const disconnect = document.getElementById('fa-disconnect');
   if (disconnect) disconnect.addEventListener('click', async () => {

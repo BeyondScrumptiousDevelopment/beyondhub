@@ -26,6 +26,12 @@
       "migrations_dir": "migrations"
     }
   ],
+  // Per-person request limits (period is 10 or 60 seconds). The namespace ids just need to be
+  // unique within the Cloudflare account.
+  "ratelimits": [
+    { "name": "API_LIMITER", "namespace_id": "4101", "simple": { "limit": 300, "period": 60 } },
+    { "name": "DRAFT_LIMITER", "namespace_id": "4102", "simple": { "limit": 10, "period": 60 } }
+  ],
   "vars": {
     // Only people with an email at this domain can use the app or email in enquiries.
     "ALLOWED_DOMAIN": "beyondscrumptious.com",
@@ -33,7 +39,12 @@
     "ACCESS_TEAM_DOMAIN": "beyondscrumptious.cloudflareaccess.com",
     // The "Application Audience (AUD) Tag" of the Access application.
     "ACCESS_AUD": "c693a171cdb2de77103daed486a6a33c9815f59d1a45547668986edf8ea487c1",
-    "CLAUDE_MODEL": "claude-sonnet-5-5"
+    "CLAUDE_MODEL": "claude-sonnet-5-5",
+    // Who can change the SOP, prices, settings and FreeAgent connection, and delete things.
+    // Comma-separated. Everyone else on the domain can still draft, edit and send quotes.
+    "ADMIN_EMAILS": "naavyen@beyondscrumptious.com",
+    // Most Claude drafts allowed in 24 hours across everyone, to cap the API bill.
+    "MAX_DRAFTS_PER_DAY": "200"
   }
   // Secret (set with `npx wrangler secret put ANTHROPIC_API_KEY`): ANTHROPIC_API_KEY
 }

@@ -1,4 +1,6 @@
 import { Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
+import { HTTPException } from 'hono/http-exception';
 import type { AppContext, Env } from './env';
 import { isAllowedEmail, requireStaff } from './auth';
 import { draftQuote, type QuoteDraft } from './claude';
@@ -9,14 +11,38 @@ import {
 } from './db';
 import { sanitiseLineItems } from './pricing';
 import * as freeagent from './freeagent';
+import {
+  UserError, checkDailyDraftCap, isAdmin, parseId, publicMessage, rateLimit, requireAdmin, securityHeaders,
+} from './security';
 
 const app = new Hono<AppContext>();
+app.use('*', securityHeaders);
 
-// The logo shown on the Cloudflare login page has to load before anyone signs in, so only
-// public/brand/ is served without the sign-in check. Keep nothing private in that folder.
-app.get('/brand/*', (c) => c.env.ASSETS.fetch(c.req.raw));
+// The logo shown on the Cloudflare login page has to load before anyone signs in, so these
+// files, and only these, are served without the sign-in check.
+const PUBLIC_FILES = new Set(['/brand/wordmark-navy.png']);
+app.get('/brand/*', async (c) => {
+  const path = new URL(c.req.url).pathname;
+  if (!PUBLIC_FILES.has(path)) return c.text('Not found', 404);
+  return c.env.ASSETS.fetch(new URL(path, c.req.url));
+});
 
 app.use('*', requireStaff);
+app.use('*', async (c, next) => {
+  c.set('isAdmin', isAdmin(c.env, c.get('userEmail')));
+  await next();
+});
+app.use('/api/*', rateLimit('API_LIMITER', 'Too many requests. Wait a minute and try again.'));
+
+// Requests bigger than this are refused before they're read: 1 MB for normal saves,
+// 20 MB for chat uploads.
+app.use('/api/*', async (c, next) => {
+  const isUpload = c.req.method === 'POST' && new URL(c.req.url).pathname === '/api/enquiries';
+  return bodyLimit({
+    maxSize: (isUpload ? 20 : 1) * 1024 * 1024,
+    onError: () => { throw new UserError('That is too large to upload.', 413); },
+  })(c, next);
+});
 
 // Changes must come from the app's own pages: browsers won't let another site add this header
 // without a CORS preflight, which this Worker never approves.
@@ -30,7 +56,9 @@ app.use('/api/*', async (c, next) => {
 const MAX_TEXT = 200_000;
 const str = (v: unknown, max = 5000) => String(v ?? '').slice(0, max);
 const num = (v: unknown, fallback = 0) => (Number.isFinite(Number(v)) ? Number(v) : fallback);
-const idParam = (v: string) => (/^\d+$/.test(v) ? Number(v) : NaN);
+const idParam = parseId;
+const isoDate = (v: unknown) => (/^\d{4}-\d{2}-\d{2}$/.test(str(v, 10)) ? str(v, 10) : '');
+const draftLimit = rateLimit('DRAFT_LIMITER', 'Too many drafts in a short time. Wait a minute and try again.');
 
 function emptyDraft(): QuoteDraft {
   return {
@@ -49,7 +77,7 @@ async function processEnquiry(env: Env, enquiryId: number, by: string): Promise<
   const enquiry = await env.DB.prepare('SELECT raw_text FROM enquiries WHERE id = ?')
     .bind(enquiryId)
     .first<{ raw_text: string }>();
-  if (!enquiry) throw new Error('Enquiry not found');
+  if (!enquiry) throw new UserError('Enquiry not found', 404);
   await env.DB.prepare("UPDATE enquiries SET status = 'drafting', error = NULL WHERE id = ?").bind(enquiryId).run();
   try {
     const [sop, priceList, settings] = await Promise.all([getSop(env.DB), getPriceList(env.DB), getSettings(env.DB)]);
@@ -58,9 +86,9 @@ async function processEnquiry(env: Env, enquiryId: number, by: string): Promise<
     await env.DB.prepare("UPDATE enquiries SET status = 'drafted' WHERE id = ?").bind(enquiryId).run();
     return quoteId;
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    console.error('Draft failed', err);
     await env.DB.prepare("UPDATE enquiries SET status = 'error', error = ? WHERE id = ?")
-      .bind(message.slice(0, 1000), enquiryId)
+      .bind(publicMessage(err).slice(0, 1000), enquiryId)
       .run();
     throw err;
   }
@@ -76,11 +104,16 @@ async function saveEnquiry(env: Env, source: string, by: string, subject: string
 }
 
 app.onError((err, c) => {
+  if (err instanceof UserError) return c.json({ error: err.message }, err.status);
+  if (err instanceof HTTPException) return err.getResponse();
+  if (err instanceof SyntaxError) return c.json({ error: "That request couldn't be read." }, 400);
   console.error(err);
-  return c.json({ error: err.message || 'Something went wrong' }, 500);
+  return c.json({ error: publicMessage(err) }, 500);
 });
 
-app.get('/api/me', (c) => c.json({ email: c.get('userEmail'), domain: c.env.ALLOWED_DOMAIN }));
+app.get('/api/me', (c) =>
+  c.json({ email: c.get('userEmail'), domain: c.env.ALLOWED_DOMAIN, is_admin: c.get('isAdmin') }),
+);
 
 // --- Home page ---------------------------------------------------------------
 
@@ -131,7 +164,7 @@ app.get('/api/sop', async (c) => {
   return c.json(row);
 });
 
-app.put('/api/sop', async (c) => {
+app.put('/api/sop', requireAdmin, async (c) => {
   const body = await c.req.json<{ content?: string }>();
   const content = str(body.content, 100_000);
   const by = c.get('userEmail');
@@ -153,7 +186,7 @@ app.get('/api/sop/history', async (c) => {
 
 app.get('/api/settings', async (c) => c.json(await getSettings(c.env.DB)));
 
-app.put('/api/settings', async (c) => {
+app.put('/api/settings', requireAdmin, async (c) => {
   const b = await c.req.json<Record<string, unknown>>();
   await c.env.DB.prepare(
     `UPDATE settings SET business_name = ?, vat_rate_percent = ?, deposit_percent = ?, quote_valid_days = ?,
@@ -174,12 +207,12 @@ app.put('/api/settings', async (c) => {
 
 function priceFields(b: Record<string, unknown>) {
   const name = str(b.name, 200).trim();
-  if (!name) throw new Error('A price list item needs a name');
+  if (!name) throw new UserError('A price list item needs a name');
   return [
     name,
     str(b.category, 100),
     str(b.unit, 50) || 'each',
-    Math.max(0, Math.round(num(b.price_pence))),
+    Math.min(100_000_000, Math.max(0, Math.round(num(b.price_pence)))),
     str(b.notes, 1000),
     b.active === false || b.active === 0 ? 0 : 1,
   ] as const;
@@ -187,7 +220,7 @@ function priceFields(b: Record<string, unknown>) {
 
 app.get('/api/prices', async (c) => c.json(await getPriceList(c.env.DB, true)));
 
-app.post('/api/prices', async (c) => {
+app.post('/api/prices', requireAdmin, async (c) => {
   const row = await c.env.DB.prepare(
     'INSERT INTO price_items (name, category, unit, price_pence, notes, active) VALUES (?, ?, ?, ?, ?, ?) RETURNING id',
   )
@@ -196,7 +229,7 @@ app.post('/api/prices', async (c) => {
   return c.json(row, 201);
 });
 
-app.put('/api/prices/:id', async (c) => {
+app.put('/api/prices/:id', requireAdmin, async (c) => {
   await c.env.DB.prepare(
     "UPDATE price_items SET name = ?, category = ?, unit = ?, price_pence = ?, notes = ?, active = ?, updated_at = datetime('now') WHERE id = ?",
   )
@@ -206,7 +239,7 @@ app.put('/api/prices/:id', async (c) => {
 });
 
 // Items are archived rather than deleted so old quotes still make sense.
-app.delete('/api/prices/:id', async (c) => {
+app.delete('/api/prices/:id', requireAdmin, async (c) => {
   await c.env.DB.prepare('UPDATE price_items SET active = 0 WHERE id = ?').bind(idParam(c.req.param('id'))).run();
   return c.json({ ok: true });
 });
@@ -229,18 +262,19 @@ app.get('/api/enquiries/:id', async (c) => {
 });
 
 /** Paste a chat or upload a WhatsApp export (.txt or .zip) from inside the app. */
-app.post('/api/enquiries', async (c) => {
+app.post('/api/enquiries', draftLimit, async (c) => {
   const form = await c.req.formData();
   const parts: string[] = [];
   const pasted = str(form.get('text'), MAX_TEXT).trim();
   if (pasted) parts.push(pasted);
   const file = form.get('file');
   if (file && typeof file !== 'string') {
-    const chat = chatTextFromAttachment(file.name, file.type, new Uint8Array(await file.arrayBuffer()));
+    const chat = chatTextFromAttachment(str(file.name, 300), str(file.type, 100), new Uint8Array(await file.arrayBuffer()));
     if (!chat) return c.json({ error: 'Upload a WhatsApp export (.txt or .zip).' }, 400);
     parts.push(chat);
   }
   if (!parts.length) return c.json({ error: 'Paste a chat or choose a file.' }, 400);
+  await checkDailyDraftCap(c.env);
 
   const by = c.get('userEmail');
   const enquiryId = await saveEnquiry(c.env, 'paste', by, str(form.get('subject'), 300), parts.join('\n\n'));
@@ -248,16 +282,17 @@ app.post('/api/enquiries', async (c) => {
     const quoteId = await processEnquiry(c.env, enquiryId, by);
     return c.json({ enquiry_id: enquiryId, quote_id: quoteId }, 201);
   } catch (err) {
-    return c.json({ enquiry_id: enquiryId, error: err instanceof Error ? err.message : String(err) }, 502);
+    return c.json({ enquiry_id: enquiryId, error: publicMessage(err) }, 502);
   }
 });
 
-app.post('/api/enquiries/:id/draft', async (c) => {
+app.post('/api/enquiries/:id/draft', draftLimit, async (c) => {
+  await checkDailyDraftCap(c.env);
   const quoteId = await processEnquiry(c.env, idParam(c.req.param('id')), c.get('userEmail'));
   return c.json({ quote_id: quoteId });
 });
 
-app.delete('/api/enquiries/:id', async (c) => {
+app.delete('/api/enquiries/:id', requireAdmin, async (c) => {
   const id = idParam(c.req.param('id'));
   await c.env.DB.batch([
     c.env.DB.prepare('UPDATE quotes SET enquiry_id = NULL WHERE enquiry_id = ?').bind(id),
@@ -296,31 +331,31 @@ app.get('/api/quotes/:id', async (c) => {
 app.put('/api/quotes/:id', async (c) => {
   const b = await c.req.json<Record<string, unknown>>();
   const status = str(b.status, 20);
-  const guests = b.guests === null || b.guests === '' ? null : Math.round(num(b.guests));
+  const guests = b.guests === null || b.guests === '' ? null : Math.min(100_000, Math.max(0, Math.round(num(b.guests))));
   const update: QuoteUpdate = {
     status: (QUOTE_STATUSES as readonly string[]).includes(status) ? status : 'draft',
     client_name: str(b.client_name, 200),
     client_phone: str(b.client_phone, 50),
     client_email: str(b.client_email, 200),
     event_type: str(b.event_type, 200),
-    event_date: str(b.event_date, 20),
+    event_date: isoDate(b.event_date),
     event_time: str(b.event_time, 100),
     venue: str(b.venue, 500),
     guests,
     summary: str(b.summary),
     line_items: sanitiseLineItems(b.line_items),
-    discount_pence: Math.max(0, Math.round(num(b.discount_pence))),
+    discount_pence: Math.min(100_000_000, Math.max(0, Math.round(num(b.discount_pence)))),
     vat_rate_percent: Math.min(100, Math.max(0, num(b.vat_rate_percent))),
     deposit_percent: Math.min(100, Math.max(0, num(b.deposit_percent))),
     deposit_fixed_pence:
       b.deposit_fixed_pence === null || b.deposit_fixed_pence === '' || b.deposit_fixed_pence === undefined
         ? null
-        : Math.max(0, Math.round(num(b.deposit_fixed_pence))),
+        : Math.min(100_000_000, Math.max(0, Math.round(num(b.deposit_fixed_pence)))),
     client_notes: str(b.client_notes, 20_000),
     internal_notes: str(b.internal_notes, 20_000),
     questions: Array.isArray(b.questions) ? b.questions.slice(0, 50).map((q) => str(q, 500)) : [],
     reply_message: str(b.reply_message, 20_000),
-    final_payment_due: /^\d{4}-\d{2}-\d{2}$/.test(str(b.final_payment_due, 10)) ? str(b.final_payment_due, 10) : '',
+    final_payment_due: isoDate(b.final_payment_due),
     payment_rule: (PAYMENT_RULES as readonly string[]).includes(str(b.payment_rule, 20)) ? str(b.payment_rule, 20) : '',
   };
   const ok = await updateQuote(c.env.DB, idParam(c.req.param('id')), update, c.get('userEmail'));
@@ -338,7 +373,7 @@ app.post('/api/quotes/:id/duplicate', async (c) => {
   return c.json({ id }, 201);
 });
 
-app.delete('/api/quotes/:id', async (c) => {
+app.delete('/api/quotes/:id', requireAdmin, async (c) => {
   await c.env.DB.prepare('DELETE FROM quotes WHERE id = ?').bind(idParam(c.req.param('id'))).run();
   return c.json({ ok: true });
 });
@@ -350,12 +385,12 @@ const freeagentCallback = (c: { req: { url: string } }) => `${new URL(c.req.url)
 app.get('/api/freeagent/status', async (c) => c.json(await freeagent.connectionStatus(c.env)));
 
 // Plain links (not fetch calls): the browser goes to FreeAgent and comes back here.
-app.get('/api/freeagent/connect', async (c) => {
+app.get('/api/freeagent/connect', requireAdmin, async (c) => {
   if (!freeagent.isConfigured(c.env)) return c.text('Add the FreeAgent app ID and secret first (see README).', 400);
   return c.redirect(await freeagent.authoriseUrl(c.env, freeagentCallback(c)));
 });
 
-app.get('/api/freeagent/callback', async (c) => {
+app.get('/api/freeagent/callback', requireAdmin, async (c) => {
   const error = c.req.query('error');
   const code = c.req.query('code');
   if (error || !code) return c.redirect(`/#/settings?freeagent=${encodeURIComponent(error || 'cancelled')}`);
@@ -364,11 +399,11 @@ app.get('/api/freeagent/callback', async (c) => {
     return c.redirect('/#/settings?freeagent=connected');
   } catch (err) {
     console.error(err);
-    return c.redirect(`/#/settings?freeagent=${encodeURIComponent(err instanceof Error ? err.message : 'failed')}`);
+    return c.redirect(`/#/settings?freeagent=${encodeURIComponent(publicMessage(err))}`);
   }
 });
 
-app.post('/api/freeagent/disconnect', async (c) => {
+app.post('/api/freeagent/disconnect', requireAdmin, async (c) => {
   await freeagent.disconnect(c.env);
   return c.json({ ok: true });
 });
@@ -392,10 +427,10 @@ app.post('/api/quotes/:id/freeagent', async (c) => {
       await c.env.DB.prepare(
         "UPDATE quotes SET freeagent_status = 'sent', freeagent_url = ?, freeagent_sent_at = datetime('now') WHERE id = ?",
       )
-        .bind(estimate.web_url || estimate.api_url, id)
+        .bind(estimate.web_url, id)
         .run();
     });
-    return c.json({ url: sent.web_url || sent.api_url });
+    return c.json({ url: sent.web_url });
   } catch (err) {
     // Only release the quote if nothing was created in FreeAgent, so retrying can't make a duplicate.
     if (!created) await c.env.DB.prepare('UPDATE quotes SET freeagent_status = NULL WHERE id = ?').bind(id).run();
@@ -413,14 +448,35 @@ export default {
 
   /** Cloudflare Email Routing delivers mail sent to the quotes address here. */
   async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext) {
-    const raw = await new Response(message.raw).arrayBuffer();
-    const parsed = await parseInboundEmail(raw);
     const sender = message.from.toLowerCase();
-    if (
-      !isAllowedEmail(sender, env.ALLOWED_DOMAIN) ||
-      parsed.from.toLowerCase() !== sender ||
-      parsed.dmarcFailed
-    ) {
+    if (!isAllowedEmail(sender, env.ALLOWED_DOMAIN)) {
+      message.setReject(`Only @${env.ALLOWED_DOMAIN} staff can send enquiries to this address.`);
+      return;
+    }
+    if (message.rawSize > 25 * 1024 * 1024) {
+      message.setReject('That email is too large. Export the chat without media.');
+      return;
+    }
+    const recent = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM enquiries WHERE submitted_by = ? AND received_at >= datetime('now', '-1 hour')",
+    )
+      .bind(sender)
+      .first<{ n: number }>();
+    if ((recent?.n ?? 0) >= 30) {
+      message.setReject('Too many enquiries from this address in the last hour. Try again later.');
+      return;
+    }
+    let parsed;
+    try {
+      await checkDailyDraftCap(env);
+      parsed = await parseInboundEmail(await new Response(message.raw).arrayBuffer());
+    } catch (err) {
+      console.error('Inbound email refused', err);
+      message.setReject(publicMessage(err));
+      return;
+    }
+    // The From header must match the sender and pass DMARC, so a forged staff address is refused.
+    if (parsed.from.toLowerCase() !== sender || parsed.dmarcFailed) {
       message.setReject(`Only @${env.ALLOWED_DOMAIN} staff can send enquiries to this address.`);
       return;
     }

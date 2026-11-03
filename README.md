@@ -137,6 +137,16 @@ You can also paste a chat or upload an export under **New enquiry**.
 
 Chats contain clients' personal data. They're stored in your D1 database and sent to the Claude API to draft the quote. Mention this in your privacy notice. Delete old enquiries from the Inbox when you no longer need them.
 
+## Security
+
+- **Sign-in:** Cloudflare Access only lets `@beyondscrumptious.com` emails in, and the app re-checks Access's signed token (RS256) on every request. `DEV_USER_EMAIL` is for local testing only, and it's ignored whenever a request arrives through Access.
+- **Admins:** `ADMIN_EMAILS` in `wrangler.jsonc` lists who can change the SOP, prices, settings and FreeAgent connection, and who can delete. The server enforces this; other staff can still draft, edit and send quotes.
+- **Limits:** 300 requests and 10 drafts per person per minute (Cloudflare rate limiting), at most `MAX_DRAFTS_PER_DAY` Claude drafts a day across everyone, uploads up to 20 MB, other requests up to 1 MB, and zips capped at 10 MB unpacked. Inbound email is limited to 30 per sender per hour.
+- **Secrets:** `ANTHROPIC_API_KEY`, `FREEAGENT_CLIENT_ID` and `FREEAGENT_CLIENT_SECRET` live only in Cloudflare's secret store and never reach the browser. FreeAgent tokens are stored encrypted (AES-GCM, key derived from the client secret). Claude and FreeAgent requests only go to their official addresses.
+- **Browser protection:** strict security headers on every response (Content-Security-Policy, HSTS, no framing, no sniffing), `Cache-Control: no-store` on API responses, no CORS, and a custom header required on every change.
+- **Errors:** staff see clear messages for problems they can fix. Anything unexpected is logged in Cloudflare and shown as a generic message.
+- **Dependencies:** exact versions are pinned in `package.json`. Run `npm audit` before updating, and prefer releases that are at least a couple of weeks old. After updating jsPDF, run `npm run vendor`.
+
 ## Local development
 
 Copy `.dev.vars.example` to `.dev.vars`. `DEV_USER_EMAIL` skips the sign-in check locally; never set it on the deployed Worker. Then run:

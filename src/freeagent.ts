@@ -1,6 +1,7 @@
 import type { Env } from './env';
 import type { QuoteRow } from './db';
 import type { LineItem } from './pricing';
+import { UserError } from './security';
 
 const DEFAULT_API_BASE = 'https://api.freeagent.com/v2';
 
@@ -12,8 +13,52 @@ interface Connection {
   connected_by: string;
 }
 
+// Only FreeAgent's own servers (or a local test server during development) ever receive the app's credentials.
+const ALLOWED_API_BASES = new Set([DEFAULT_API_BASE, 'https://api.sandbox.freeagent.com/v2']);
+
 export function apiBase(env: Env): string {
-  return (env.FREEAGENT_API_BASE || DEFAULT_API_BASE).replace(/\/$/, '');
+  const base = (env.FREEAGENT_API_BASE || DEFAULT_API_BASE).replace(/\/$/, '');
+  if (ALLOWED_API_BASES.has(base) || (env.DEV_USER_EMAIL && base.startsWith('http://localhost'))) return base;
+  throw new UserError('FREEAGENT_API_BASE must be a FreeAgent address.');
+}
+
+// --- Token storage --------------------------------------------------------------
+// FreeAgent tokens are encrypted in the database (AES-GCM) with a key derived from the app's
+// client secret, which lives only in Cloudflare's secret store. A copy of the database alone
+// is useless; changing the secret means connecting FreeAgent again.
+
+const ENCRYPTED_PREFIX = 'v1:';
+
+async function tokenKey(env: Env): Promise<CryptoKey> {
+  const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(clientSecret(env)), 'HKDF', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: new TextEncoder().encode('beyondhub-freeagent-tokens'), info: new Uint8Array() },
+    material,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt'],
+  );
+}
+
+const toBase64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
+const fromBase64 = (s: string) => Uint8Array.from(atob(s), (ch) => ch.charCodeAt(0));
+
+async function sealToken(env: Env, token: string): Promise<string> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const sealed = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await tokenKey(env), new TextEncoder().encode(token)));
+  return `${ENCRYPTED_PREFIX}${toBase64(iv)}.${toBase64(sealed)}`;
+}
+
+async function openToken(env: Env, stored: string): Promise<string> {
+  // Tokens saved before encryption was added are plain text; they're encrypted on the next refresh.
+  if (!stored.startsWith(ENCRYPTED_PREFIX)) return stored;
+  const [iv, sealed] = stored.slice(ENCRYPTED_PREFIX.length).split('.');
+  try {
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromBase64(iv) }, await tokenKey(env), fromBase64(sealed));
+    return new TextDecoder().decode(plain);
+  } catch {
+    throw new UserError('The FreeAgent connection needs renewing. Go to Settings, Disconnect, then Connect FreeAgent again.', 409);
+  }
 }
 
 // Trimmed because values pasted into the Cloudflare dashboard easily pick up a stray space or line break.
@@ -34,7 +79,7 @@ async function tokenRequest(env: Env, params: Record<string, string>) {
     headers: { Authorization: basicAuth(env), 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams(params).toString(),
   });
-  if (!res.ok) throw new Error(`FreeAgent sign-in failed (${res.status}): ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok) throw new UserError(`FreeAgent sign-in failed (${res.status}): ${(await res.text()).slice(0, 300)}`, 502);
   return (await res.json()) as { access_token: string; refresh_token?: string; expires_in: number };
 }
 
@@ -69,10 +114,10 @@ export async function completeConnection(
     "SELECT pending_state, pending_state_expires_at FROM integrations WHERE id = 'freeagent'",
   ).first<{ pending_state: string | null; pending_state_expires_at: number | null }>();
   if (!row?.pending_state || row.pending_state !== state || Date.now() > (row.pending_state_expires_at ?? 0)) {
-    throw new Error('That FreeAgent sign-in link has expired. Click Connect FreeAgent again.');
+    throw new UserError('That FreeAgent sign-in link has expired. Click Connect FreeAgent again.');
   }
   const tokens = await tokenRequest(env, { grant_type: 'authorization_code', code, redirect_uri: redirectUri });
-  if (!tokens.refresh_token) throw new Error('FreeAgent did not return a refresh token.');
+  if (!tokens.refresh_token) throw new UserError('FreeAgent did not return a refresh token.');
   const company = await fetchJson<{ company: { subdomain?: string } }>(env, tokens.access_token, 'GET', '/company');
   await env.DB.prepare(
     `UPDATE integrations SET access_token = ?, refresh_token = ?, expires_at = ?, company_subdomain = ?,
@@ -80,8 +125,8 @@ export async function completeConnection(
      WHERE id = 'freeagent'`,
   )
     .bind(
-      tokens.access_token, tokens.refresh_token, Date.now() + tokens.expires_in * 1000,
-      company.company.subdomain ?? '', by,
+      await sealToken(env, tokens.access_token), await sealToken(env, tokens.refresh_token),
+      Date.now() + tokens.expires_in * 1000, cleanSubdomain(company.company.subdomain), by,
     )
     .run();
 }
@@ -107,20 +152,25 @@ async function accessToken(env: Env): Promise<Connection> {
     `SELECT access_token, refresh_token, expires_at, company_subdomain, connected_by FROM integrations
      WHERE id = 'freeagent' AND refresh_token IS NOT NULL`,
   ).first<Connection>();
-  if (!row) throw new Error('FreeAgent is not connected. Connect it under Settings first.');
-  if (Date.now() < row.expires_at - 60_000) return row;
-
-  const tokens = await tokenRequest(env, { grant_type: 'refresh_token', refresh_token: row.refresh_token });
-  const updated = {
+  if (!row) throw new UserError('FreeAgent is not connected. Connect it under Settings first.', 409);
+  const current = {
     ...row,
+    access_token: await openToken(env, row.access_token),
+    refresh_token: await openToken(env, row.refresh_token),
+  };
+  if (Date.now() < row.expires_at - 60_000) return current;
+
+  const tokens = await tokenRequest(env, { grant_type: 'refresh_token', refresh_token: current.refresh_token });
+  const updated = {
+    ...current,
     access_token: tokens.access_token,
-    refresh_token: tokens.refresh_token || row.refresh_token,
+    refresh_token: tokens.refresh_token || current.refresh_token,
     expires_at: Date.now() + tokens.expires_in * 1000,
   };
   await env.DB.prepare(
     "UPDATE integrations SET access_token = ?, refresh_token = ?, expires_at = ? WHERE id = 'freeagent'",
   )
-    .bind(updated.access_token, updated.refresh_token, updated.expires_at)
+    .bind(await sealToken(env, updated.access_token), await sealToken(env, updated.refresh_token), updated.expires_at)
     .run();
   return updated;
 }
@@ -137,7 +187,7 @@ async function fetchJson<T>(env: Env, token: string, method: string, path: strin
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await res.text();
-  if (!res.ok) throw new Error(`FreeAgent said no (${res.status} on ${method} ${path}): ${text.slice(0, 400)}`);
+  if (!res.ok) throw new UserError(`FreeAgent said no (${res.status} on ${method} ${path}): ${text.slice(0, 400)}`, 502);
   return (text ? JSON.parse(text) : {}) as T;
 }
 
@@ -151,6 +201,11 @@ interface FreeAgentContact {
   email?: string;
   phone_number?: string;
   mobile?: string;
+}
+
+/** Company subdomains are letters, digits and hyphens; anything else is dropped rather than put in a link. */
+function cleanSubdomain(value: string | undefined): string {
+  return /^[a-z0-9-]{1,63}$/i.test(value ?? '') ? value!.toLowerCase() : '';
 }
 
 const digits = (s: string | undefined) => (s ?? '').replace(/\D/g, '').replace(/^44/, '0');
@@ -179,7 +234,7 @@ async function findOrCreateContact(env: Env, token: string, q: QuoteRow): Promis
   if (byName) return byName;
 
   const parts = q.client_name.trim().split(/\s+/).filter(Boolean);
-  if (!parts.length) throw new Error('Add the client\'s name to the quote before sending it to FreeAgent.');
+  if (!parts.length) throw new UserError('Add the client\'s name to the quote before sending it to FreeAgent.');
   // FreeAgent needs a first and last name, or an organisation name; a single name goes in as the latter.
   const contact: Record<string, string> =
     parts.length > 1
@@ -244,10 +299,13 @@ export async function sendQuote(
   });
 
   const path = new URL(estimate.url).pathname.replace(/^\/v2/, '');
+  if (!/^\/estimates\/\d+$/.test(path)) throw new UserError('FreeAgent returned an unexpected estimate address.', 502);
   const id = path.split('/').pop();
   const sent = {
     api_url: estimate.url,
-    web_url: conn.company_subdomain ? `https://${conn.company_subdomain}.freeagent.com/estimates/${id}` : '',
+    web_url: cleanSubdomain(conn.company_subdomain) && /^\d+$/.test(id ?? '')
+      ? `https://${cleanSubdomain(conn.company_subdomain)}.freeagent.com/estimates/${id}`
+      : '',
   };
   await onCreated(sent);
 
@@ -256,7 +314,7 @@ export async function sendQuote(
     await fetchJson(env, token, 'PUT', `${path}/transitions/mark_as_sent`, {});
     await fetchJson(env, token, 'PUT', `${path}/transitions/mark_as_approved`, {});
   } catch (err) {
-    throw new Error(
+    throw new UserError(
       `The quote is in FreeAgent, but it couldn't be marked as approved. Open it in FreeAgent and approve it there. (${err instanceof Error ? err.message : err})`,
     );
   }

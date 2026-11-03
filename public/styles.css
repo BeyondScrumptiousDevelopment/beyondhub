@@ -157,3 +157,9 @@ pre.raw { white-space: pre-wrap; word-break: break-word; max-height: 400px; over
   .hero::after { width: 70px; height: 140px; }
   .hero .hello { font-size: 26px; }
 }
+
+/* Admin-only controls (the server also refuses these actions for non-admins). */
+.admin-note { display: none; color: var(--muted); font-size: 13px; }
+.not-admin .admin-only { display: none !important; }
+.not-admin .admin-note { display: block; }
+.signout { font-size: 13px; color: var(--muted); }

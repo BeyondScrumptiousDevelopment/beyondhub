@@ -15,9 +15,10 @@ export function isAllowedEmail(email: string, allowedDomain: string): boolean {
  * misconfigured or someone reaches the Worker another way.
  */
 async function verifiedEmail(request: Request, env: Env): Promise<string | null> {
-  // Only ever set in .dev.vars, which `wrangler deploy` does not upload.
-  if (env.DEV_USER_EMAIL) return env.DEV_USER_EMAIL;
   const token = request.headers.get('Cf-Access-Jwt-Assertion');
+  // Local development only (.dev.vars, which `wrangler deploy` doesn't upload). Every request on the
+  // live site comes through Cloudflare Access with a token, so the bypass can never apply there.
+  if (env.DEV_USER_EMAIL && !token) return env.DEV_USER_EMAIL;
   if (!token || !env.ACCESS_TEAM_DOMAIN || !env.ACCESS_AUD) return null;
 
   const issuer = `https://${env.ACCESS_TEAM_DOMAIN}`;
@@ -27,7 +28,8 @@ async function verifiedEmail(request: Request, env: Env): Promise<string | null>
     jwksByTeam.set(issuer, jwks);
   }
   try {
-    const { payload } = await jwtVerify(token, jwks, { issuer, audience: env.ACCESS_AUD });
+    // Cloudflare Access signs with RS256; refusing other algorithms rules out algorithm-swap tricks.
+    const { payload } = await jwtVerify(token, jwks, { issuer, audience: env.ACCESS_AUD, algorithms: ['RS256'] });
     return typeof payload.email === 'string' ? payload.email : null;
   } catch {
     return null;
