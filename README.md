@@ -100,7 +100,7 @@ You can also paste a chat or upload an export under **New enquiry**.
 ## Costs
 
 - Cloudflare Workers, D1, Email Routing and Access (up to 50 users): free tier.
-- Claude API: pay per use. Each draft sends your SOP, price list and the chat. Expect roughly 5–15p per quote with the default model (`CLAUDE_MODEL` in `wrangler.jsonc`, currently Claude Opus 5.5). Switching to `claude-sonnet-5-5` roughly halves that. Very long chats cost more. The app keeps the most recent ~200,000 characters.
+- Claude API: pay per use. Each draft sends your SOP, price list and the chat. Expect roughly 3–4p per quote with the default model (`CLAUDE_MODEL` in `wrangler.jsonc`, currently Claude Sonnet 5.5). Switching to `claude-opus-5-5` is more careful but costs about twice as much. Very long chats cost more. The app keeps the most recent ~200,000 characters.
 
 ## Privacy
 

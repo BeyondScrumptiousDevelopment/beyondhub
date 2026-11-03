@@ -124,7 +124,7 @@ export async function draftQuote(
   const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   const response = await client.beta.messages
     .stream({
-      model: env.CLAUDE_MODEL || 'claude-opus-5-5',
+      model: env.CLAUDE_MODEL || 'claude-sonnet-5-5',
       max_tokens: 32000,
       betas: ['server-side-fallback-2026-07-01'],
       fallbacks: 'default',

@@ -31,7 +31,7 @@
     "ACCESS_TEAM_DOMAIN": "beyondscrumptious.cloudflareaccess.com",
     // The "Application Audience (AUD) Tag" of the Access application.
     "ACCESS_AUD": "c693a171cdb2de77103daed486a6a33c9815f59d1a45547668986edf8ea487c1",
-    "CLAUDE_MODEL": "claude-opus-5-5"
+    "CLAUDE_MODEL": "claude-sonnet-5-5"
   }
   // Secret (set with `npx wrangler secret put ANTHROPIC_API_KEY`): ANTHROPIC_API_KEY
 }
