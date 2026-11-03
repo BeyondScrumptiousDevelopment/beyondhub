@@ -232,6 +232,8 @@ export async function sendQuote(
     estimate: {
       contact,
       estimate_type: 'Quote',
+      // FreeAgent requires a starting status; it's moved to Approved below.
+      status: 'Draft',
       dated_on: new Date().toISOString().slice(0, 10),
       currency: 'GBP',
       reference: q.reference,
