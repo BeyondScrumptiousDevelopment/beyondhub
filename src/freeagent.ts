@@ -16,12 +16,16 @@ export function apiBase(env: Env): string {
   return (env.FREEAGENT_API_BASE || DEFAULT_API_BASE).replace(/\/$/, '');
 }
 
+// Trimmed because values pasted into the Cloudflare dashboard easily pick up a stray space or line break.
+const clientId = (env: Env) => (env.FREEAGENT_CLIENT_ID ?? '').trim();
+const clientSecret = (env: Env) => (env.FREEAGENT_CLIENT_SECRET ?? '').trim();
+
 export function isConfigured(env: Env): boolean {
-  return Boolean(env.FREEAGENT_CLIENT_ID && env.FREEAGENT_CLIENT_SECRET);
+  return Boolean(clientId(env) && clientSecret(env));
 }
 
 function basicAuth(env: Env): string {
-  return `Basic ${btoa(`${env.FREEAGENT_CLIENT_ID}:${env.FREEAGENT_CLIENT_SECRET}`)}`;
+  return `Basic ${btoa(`${clientId(env)}:${clientSecret(env)}`)}`;
 }
 
 async function tokenRequest(env: Env, params: Record<string, string>) {
@@ -48,7 +52,7 @@ export async function authoriseUrl(env: Env, redirectUri: string): Promise<strin
     .run();
   const url = new URL(`${apiBase(env)}/approve_app`);
   url.searchParams.set('response_type', 'code');
-  url.searchParams.set('client_id', env.FREEAGENT_CLIENT_ID!);
+  url.searchParams.set('client_id', clientId(env));
   url.searchParams.set('redirect_uri', redirectUri);
   url.searchParams.set('state', state);
   return url.toString();
@@ -86,7 +90,10 @@ export async function connectionStatus(env: Env) {
   const row = await env.DB.prepare(
     "SELECT connected_by, connected_at, company_subdomain FROM integrations WHERE id = 'freeagent' AND refresh_token IS NOT NULL",
   ).first<{ connected_by: string; connected_at: string; company_subdomain: string }>();
-  const missing = (['FREEAGENT_CLIENT_ID', 'FREEAGENT_CLIENT_SECRET'] as const).filter((name) => !env[name]);
+  const missing = [
+    ...(clientId(env) ? [] : ['FREEAGENT_CLIENT_ID']),
+    ...(clientSecret(env) ? [] : ['FREEAGENT_CLIENT_SECRET']),
+  ];
   return { configured: isConfigured(env), missing, connected: Boolean(row), ...row };
 }
 
