@@ -11,6 +11,7 @@ import {
 } from './db';
 import { sanitiseLineItems } from './pricing';
 import * as freeagent from './freeagent';
+import { INVOICE_KINDS, createInvoice, invoiceToJson, paidDeposit, type InvoiceKind, type InvoiceRow } from './invoices';
 import {
   UserError, checkDailyDraftCap, isAdmin, parseId, publicMessage, rateLimit, requireAdmin, securityHeaders,
 } from './security';
@@ -62,7 +63,7 @@ const draftLimit = rateLimit('DRAFT_LIMITER', 'Too many drafts in a short time. 
 
 function emptyDraft(): QuoteDraft {
   return {
-    client_name: '', client_phone: '', client_email: '', event_type: '', event_date: '', event_time: '',
+    client_name: '', client_phone: '', client_email: '', client_address: '', event_type: '', event_date: '', event_time: '',
     venue: '', guests: null, summary: '', line_items: [], deposit_percent: null, deposit_fixed_pence: null,
     questions: [], client_notes: '', internal_notes: '', reply_message: '',
   };
@@ -127,7 +128,10 @@ app.get('/api/dashboard', async (c) => {
          SUM(status = 'sent') AS awaiting_reply,
          SUM(status = 'accepted' AND status_changed_at >= date('now', 'start of month')) AS accepted_this_month,
          COALESCE(SUM(CASE WHEN status = 'accepted' AND status_changed_at >= date('now', 'start of month') THEN total_pence END), 0) AS accepted_value_this_month,
-         SUM(status = 'accepted' AND event_date BETWEEN date('now') AND date('now', '+30 days')) AS events_next_30_days
+         SUM(status = 'accepted' AND event_date BETWEEN date('now') AND date('now', '+30 days')) AS events_next_30_days,
+         (SELECT COUNT(*) FROM invoices WHERE status = 'issued') AS unpaid_invoices,
+         (SELECT COALESCE(SUM(amount_due_pence), 0) FROM invoices WHERE status = 'issued') AS unpaid_value,
+         (SELECT COUNT(*) FROM invoices WHERE status = 'issued' AND due_on < date('now')) AS overdue_invoices
        FROM quotes`,
     ),
     db.prepare(
@@ -190,7 +194,8 @@ app.put('/api/settings', requireAdmin, async (c) => {
   const b = await c.req.json<Record<string, unknown>>();
   await c.env.DB.prepare(
     `UPDATE settings SET business_name = ?, vat_rate_percent = ?, deposit_percent = ?, quote_valid_days = ?,
-      quote_terms = ?, updated_at = datetime('now') WHERE id = 1`,
+      quote_terms = ?, contact_lines = ?, footer_tagline = ?, questions_email = ?, bank_account_name = ?,
+      bank_sort_code = ?, bank_account_number = ?, updated_at = datetime('now') WHERE id = 1`,
   )
     .bind(
       str(b.business_name, 200) || 'Beyond Scrumptious',
@@ -198,6 +203,12 @@ app.put('/api/settings', requireAdmin, async (c) => {
       Math.min(100, Math.max(0, num(b.deposit_percent))),
       Math.max(1, Math.round(num(b.quote_valid_days, 14))),
       str(b.quote_terms, 20_000),
+      str(b.contact_lines, 500),
+      str(b.footer_tagline, 200),
+      str(b.questions_email, 200),
+      str(b.bank_account_name, 100),
+      str(b.bank_sort_code, 20),
+      str(b.bank_account_number, 20),
     )
     .run();
   return c.json({ ok: true });
@@ -337,6 +348,7 @@ app.put('/api/quotes/:id', async (c) => {
     client_name: str(b.client_name, 200),
     client_phone: str(b.client_phone, 50),
     client_email: str(b.client_email, 200),
+    client_address: str(b.client_address, 500),
     event_type: str(b.event_type, 200),
     event_date: isoDate(b.event_date),
     event_time: str(b.event_time, 100),
@@ -374,8 +386,114 @@ app.post('/api/quotes/:id/duplicate', async (c) => {
 });
 
 app.delete('/api/quotes/:id', requireAdmin, async (c) => {
-  await c.env.DB.prepare('DELETE FROM quotes WHERE id = ?').bind(idParam(c.req.param('id'))).run();
+  const id = idParam(c.req.param('id'));
+  const invoiced = await c.env.DB.prepare('SELECT COUNT(*) AS n FROM invoices WHERE quote_id = ?').bind(id).first<{ n: number }>();
+  if (invoiced?.n) throw new UserError('This quote has invoices, so it can’t be deleted. Void the invoices instead.', 409);
+  await c.env.DB.prepare('DELETE FROM quotes WHERE id = ?').bind(id).run();
   return c.json({ ok: true });
+});
+
+// --- Invoices ------------------------------------------------------------------
+
+const INVOICE_LIST_COLUMNS = `i.id, i.number, i.kind, i.status, i.issued_on, i.due_on, i.paid_on, i.amount_due_pence,
+  i.total_pence, i.quote_id, i.freeagent_url, json_extract(i.snapshot, '$.client_name') AS client_name,
+  json_extract(i.snapshot, '$.quote_reference') AS quote_reference, json_extract(i.snapshot, '$.event_date') AS event_date`;
+
+app.get('/api/invoices', async (c) => {
+  const status = str(c.req.query('status'), 20);
+  const { results } = await c.env.DB.prepare(
+    `SELECT ${INVOICE_LIST_COLUMNS} FROM invoices i WHERE (?1 = '' OR i.status = ?1) ORDER BY i.id DESC LIMIT 300`,
+  )
+    .bind(status)
+    .all();
+  return c.json(results);
+});
+
+app.get('/api/quotes/:id/invoices', async (c) => {
+  const id = idParam(c.req.param('id'));
+  const [{ results }, deposit] = await Promise.all([
+    c.env.DB.prepare(`SELECT ${INVOICE_LIST_COLUMNS} FROM invoices i WHERE i.quote_id = ? ORDER BY i.id`).bind(id).all(),
+    paidDeposit(c.env.DB, id),
+  ]);
+  return c.json({ invoices: results, paid_deposit: deposit });
+});
+
+app.post('/api/quotes/:id/invoices', async (c) => {
+  const id = idParam(c.req.param('id'));
+  const b = await c.req.json<Record<string, unknown>>();
+  const kind = str(b.kind, 10) as InvoiceKind;
+  if (!INVOICE_KINDS.includes(kind)) throw new UserError('Choose a deposit, balance or full invoice.');
+  const issuedOn = isoDate(b.issued_on);
+  const dueOn = isoDate(b.due_on);
+  if (!issuedOn || !dueOn) throw new UserError('Enter the invoice date and the due date.');
+  const quote = await c.env.DB.prepare('SELECT * FROM quotes WHERE id = ?').bind(id).first<QuoteRow>();
+  if (!quote) throw new UserError('Not found', 404);
+  const invoiceId = await createInvoice(c.env.DB, quote, {
+    kind,
+    issued_on: issuedOn,
+    due_on: dueOn,
+    deposit_paid_pence: Math.min(100_000_000, Math.max(0, Math.round(num(b.deposit_paid_pence)))),
+    deposit_paid_on: isoDate(b.deposit_paid_on),
+  }, c.get('userEmail'));
+  return c.json({ id: invoiceId }, 201);
+});
+
+app.get('/api/invoices/:id', async (c) => {
+  const row = await c.env.DB.prepare('SELECT * FROM invoices WHERE id = ?').bind(idParam(c.req.param('id'))).first<InvoiceRow>();
+  return row ? c.json(invoiceToJson(row)) : c.json({ error: 'Not found' }, 404);
+});
+
+// Paid / not paid. Voided invoices stay void.
+app.post('/api/invoices/:id/status', async (c) => {
+  const b = await c.req.json<Record<string, unknown>>();
+  const paid = b.status === 'paid';
+  const paidOn = paid ? isoDate(b.paid_on) : '';
+  if (paid && !paidOn) throw new UserError('Enter the date it was paid.');
+  const result = await c.env.DB.prepare(
+    `UPDATE invoices SET status = ?, paid_on = ?, updated_by = ?, updated_at = datetime('now')
+     WHERE id = ? AND status <> 'void'`,
+  )
+    .bind(paid ? 'paid' : 'issued', paidOn, c.get('userEmail'), idParam(c.req.param('id')))
+    .run();
+  if (!result.meta.changes) throw new UserError('That invoice is void, or doesn’t exist.', 409);
+  return c.json({ ok: true });
+});
+
+// Invoices are never deleted, so their numbers are never reused.
+app.post('/api/invoices/:id/void', requireAdmin, async (c) => {
+  await c.env.DB.prepare(
+    "UPDATE invoices SET status = 'void', updated_by = ?, updated_at = datetime('now') WHERE id = ?",
+  )
+    .bind(c.get('userEmail'), idParam(c.req.param('id')))
+    .run();
+  return c.json({ ok: true });
+});
+
+app.post('/api/invoices/:id/freeagent', async (c) => {
+  const id = idParam(c.req.param('id'));
+  const claim = await c.env.DB.prepare(
+    "UPDATE invoices SET freeagent_status = 'sending' WHERE id = ? AND status <> 'void' AND freeagent_status IS NULL",
+  )
+    .bind(id)
+    .run();
+  if (!claim.meta.changes) throw new UserError('This invoice is void or already in FreeAgent.', 409);
+  let created = false;
+  try {
+    const row = await c.env.DB.prepare('SELECT * FROM invoices WHERE id = ?').bind(id).first<InvoiceRow>();
+    const url = await freeagent.sendInvoice(c.env, row!, async (webUrl) => {
+      created = true;
+      await c.env.DB.prepare(
+        "UPDATE invoices SET freeagent_status = 'sent', freeagent_url = ?, freeagent_sent_at = datetime('now') WHERE id = ?",
+      )
+        .bind(webUrl, id)
+        .run();
+    });
+    return c.json({ url });
+  } catch (err) {
+    // Only release it if nothing was created in FreeAgent, so retrying can't make a duplicate.
+    if (!created) await c.env.DB.prepare('UPDATE invoices SET freeagent_status = NULL WHERE id = ?').bind(id).run();
+    throw err;
+  }
 });
 
 // --- FreeAgent ------------------------------------------------------------------

@@ -92,8 +92,9 @@ td input, td select { padding: 5px 7px; }
 .badge { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--border); }
 .badge.draft { color: var(--muted); }
 .badge.sent, .badge.drafting, .badge.new { color: var(--accent); border-color: var(--accent); }
-.badge.accepted, .badge.drafted { color: var(--ok); border-color: var(--ok); }
-.badge.declined, .badge.error { color: var(--danger); border-color: var(--danger); }
+.badge.accepted, .badge.drafted, .badge.paid { color: var(--ok); border-color: var(--ok); }
+.badge.declined, .badge.error, .badge.void { color: var(--danger); border-color: var(--danger); }
+.badge.unpaid { color: var(--accent); border-color: var(--accent); }
 .warn { background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: 8px; padding: 10px 12px; }
 .totals { margin-left: auto; min-width: 280px; }
 .totals div { display: flex; justify-content: space-between; padding: 3px 0; }

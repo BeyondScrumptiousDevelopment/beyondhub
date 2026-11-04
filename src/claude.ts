@@ -8,6 +8,7 @@ export interface QuoteDraft {
   client_name: string;
   client_phone: string;
   client_email: string;
+  client_address: string;
   event_type: string;
   event_date: string;
   event_time: string;
@@ -31,7 +32,7 @@ const DRAFT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   required: [
-    'client_name', 'client_phone', 'client_email', 'event_type', 'event_date', 'event_time',
+    'client_name', 'client_phone', 'client_email', 'client_address', 'event_type', 'event_date', 'event_time',
     'venue', 'guests', 'summary', 'line_items', 'deposit_percent', 'deposit_fixed_pence', 'questions', 'client_notes', 'internal_notes',
     'reply_message',
   ],
@@ -39,6 +40,7 @@ const DRAFT_SCHEMA = {
     client_name: { ...str, description: 'The client\'s name, or "" if unknown.' },
     client_phone: { ...str, description: 'The client\'s phone number, or "" if unknown.' },
     client_email: { ...str, description: 'The client\'s email, or "" if unknown.' },
+    client_address: { ...str, description: 'The client\'s billing address if they gave one, or "".' },
     event_type: { ...str, description: 'e.g. wedding, birthday, corporate lunch, or "" if unknown.' },
     event_date: { ...str, description: 'ISO date YYYY-MM-DD if known, otherwise "".' },
     event_time: { ...str, description: 'Start/finish times as stated, or "".' },
@@ -183,6 +185,7 @@ export async function draftQuote(
     client_name: s('client_name'),
     client_phone: s('client_phone'),
     client_email: s('client_email'),
+    client_address: s('client_address'),
     event_type: s('event_type'),
     event_date: s('event_date'),
     event_time: s('event_time'),

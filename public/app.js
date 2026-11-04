@@ -147,6 +147,8 @@ const routes = {
   new: renderNewEnquiry,
   inbox: renderInbox,
   quote: renderQuote,
+  invoices: renderInvoicesList,
+  invoice: renderInvoice,
   enquiry: renderEnquiry,
   sop: renderSop,
   prices: renderPrices,
@@ -159,7 +161,8 @@ let currentHash = location.hash;
 async function route() {
   currentHash = location.hash;
   const [, name = 'home', id] = location.hash.split('?')[0].split('/');
-  document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.route === name));
+  const section = { quote: 'quotes', invoice: 'invoices', enquiry: 'inbox' }[name] || name;
+  document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.route === section));
   unsavedChanges = false;
   app.innerHTML = '<p class="muted">Loading…</p>';
   try {
@@ -231,6 +234,7 @@ async function renderHome() {
       ${tile('#/quotes?status=sent', 'Awaiting reply', n(c.awaiting_reply), 'quotes sent to clients')}
       ${tile('#/quotes?status=accepted', 'Accepted this month', n(c.accepted_this_month), `${money(c.accepted_value_this_month)} booked`)}
       ${tile('#/quotes?status=accepted', 'Events coming up', n(c.events_next_30_days), 'in the next 30 days')}
+      ${tile('#/invoices?status=issued', 'Unpaid invoices', n(c.unpaid_invoices), `${money(c.unpaid_value)} due${n(c.overdue_invoices) ? ` · ${n(c.overdue_invoices)} overdue` : ''}`)}
     </div>
 
     <div class="piping" aria-hidden="true"></div>
@@ -463,6 +467,7 @@ async function renderQuote(id) {
           ${field('client_name', 'Client name')}${field('client_phone', 'Phone')}${field('client_email', 'Email', 'email')}
           ${field('event_type', 'Event type')}${field('event_date', 'Event date', 'date')}${field('event_time', 'Time')}
           ${field('venue', 'Venue')}${field('guests', 'Guests', 'number')}
+          <label>Billing address<textarea data-field="client_address" rows="2" style="min-height:0">${esc(q.client_address ?? '')}</textarea></label>
         </div><br>
         <label>Summary<textarea data-field="summary">${esc(q.summary)}</textarea></label>
       </div>
@@ -491,6 +496,12 @@ async function renderQuote(id) {
           </div>
           <div class="totals" id="totals"></div>
         </div>
+      </div>
+
+      <div class="panel" id="invoices-panel">
+        <h2 style="margin-top:0">Invoices</h2>
+        <div id="invoice-list"></div>
+        <div id="invoice-new"></div>
       </div>
 
       <div class="panel">
@@ -710,7 +721,7 @@ async function renderQuote(id) {
     if (items.some((i) => i.needs_review) && !confirm('Some lines still need checking. Download anyway?')) return;
     e.target.disabled = true;
     try {
-      await downloadQuotePdf(collect(), settings);
+      await downloadQuoteDocument(collect(), settings);
     } catch (err) {
       toast(`Couldn't make the PDF: ${err.message}`, true);
     } finally {
@@ -718,193 +729,202 @@ async function renderQuote(id) {
     }
   });
 
-  renderLines();
-}
+  // ---- Invoices for this quote
+  async function renderInvoices() {
+    const { invoices, paid_deposit: paidDeposit } = await api(`/api/quotes/${id}/invoices`);
+    const list = document.getElementById('invoice-list');
+    const live = invoices.filter((i) => i.status !== 'void');
+    list.innerHTML = invoices.length ? `<div class="table-wrap"><table>
+      <thead><tr><th>Invoice</th><th>Type</th><th>Due</th><th class="num">Amount</th><th>Status</th><th></th></tr></thead>
+      <tbody>${invoices.map((i) => `<tr>
+        <td><a href="#/invoice/${i.id}">${esc(i.number)}</a></td><td>${esc(INVOICE_KIND_LABELS[i.kind])}</td>
+        <td>${esc(formatDate(i.due_on))}</td><td class="num">${money(i.amount_due_pence)}</td><td>${badge(i.status)}</td>
+        <td class="num"><button data-pdf="${i.id}">Download PDF</button></td></tr>`).join('')}</tbody></table></div>`
+      : '<p class="muted">No invoices yet.</p>';
+    list.querySelectorAll('[data-pdf]').forEach((b) => b.addEventListener('click', () => downloadInvoice(b.dataset.pdf, b)));
 
-// ---------- PDF quote ----------
-
-function loadScript(src) {
-  return new Promise((resolve, reject) => {
-    const el = document.createElement('script');
-    el.src = src;
-    el.onload = resolve;
-    el.onerror = () => reject(new Error(`couldn't load ${src}`));
-    document.head.appendChild(el);
-  });
-}
-
-let pdfLibrary;
-/** The PDF library is large, so it's only fetched the first time someone downloads a quote. */
-function loadPdfLibrary() {
-  pdfLibrary = pdfLibrary || loadScript('/vendor/jspdf.umd.min.js').then(() => loadScript('/vendor/jspdf.plugin.autotable.min.js'));
-  return pdfLibrary.catch((err) => { pdfLibrary = null; throw err; });
-}
-
-async function imageDataUrl(src) {
-  const blob = await (await fetch(src)).blob();
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
-  });
-}
-
-// The PDF's built-in fonts only cover Western European characters; anything else would print as junk.
-function pdfText(value) {
-  return String(value ?? '')
-    .replace(/[−]/g, '-')
-    .replace(/[^\x09\x0a\x0d\x20-\x7e -ÿ–—‘’“”•…€£·]/g, '');
-}
-
-function safeFileName(s) {
-  return String(s || '').replace(/[\\/:*?"<>|]+/g, '').replace(/\s+/g, ' ').trim();
-}
-
-async function downloadQuotePdf(q, settings) {
-  await loadPdfLibrary();
-  const { jsPDF } = window.jspdf;
-  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
-  const NAVY = [25, 37, 63];
-  const SLATE = [63, 84, 120];
-  const TINT = [197, 215, 236];
-  const MIST = [243, 248, 251];
-  const SURFACE = [216, 232, 244];
-  const pageW = doc.internal.pageSize.getWidth();
-  const pageH = doc.internal.pageSize.getHeight();
-  const M = 16;
-  const t = computeTotals(q.line_items, q.discount_pence, q.vat_rate_percent, q.deposit_percent, q.deposit_fixed_pence);
-  const issued = isoToday();
-  const validUntil = addDays(issued, Number(settings.quote_valid_days) || 7);
-
-  // Header band with the wordmark.
-  doc.setFillColor(...SURFACE);
-  doc.rect(0, 0, pageW, 38, 'F');
-  const logo = await imageDataUrl('/brand/wordmark-navy.png');
-  const props = doc.getImageProperties(logo);
-  const logoW = 72;
-  doc.addImage(logo, 'PNG', M, 12, logoW, (logoW * props.height) / props.width, 'wordmark', 'FAST');
-  doc.setTextColor(...NAVY);
-  doc.setFont('times', 'normal');
-  doc.setFontSize(20);
-  doc.text('QUOTE', pageW - M, 18, { align: 'right' });
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(9.5);
-  doc.setTextColor(...SLATE);
-  doc.text(pdfText(q.reference), pageW - M, 24, { align: 'right' });
-  doc.text(`Issued ${formatDate(issued)}  ·  valid until ${formatDate(validUntil)}`, pageW - M, 29, { align: 'right' });
-
-  // Client and event details, in two columns.
-  let y = 50;
-  const details = [
-    ['Client', q.client_name], ['Event', q.event_type], ['Phone', q.client_phone], ['Date', formatDate(q.event_date)],
-    ['Email', q.client_email], ['Time', q.event_time], ['Venue', q.venue], ['Guests', q.guests ?? ''],
-  ].filter(([, v]) => v !== '' && v !== null && v !== undefined);
-  const colW = (pageW - 2 * M) / 2;
-  details.forEach(([label, value], i) => {
-    const x = M + (i % 2) * colW;
-    const rowY = y + Math.floor(i / 2) * 7;
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(8);
-    doc.setTextColor(...SLATE);
-    doc.text(label.toUpperCase(), x, rowY);
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(10);
-    doc.setTextColor(...NAVY);
-    doc.text(doc.splitTextToSize(pdfText(value), colW - 24)[0] || '', x + 20, rowY);
-  });
-  y += Math.ceil(details.length / 2) * 7 + 4;
-
-  // Line items.
-  window.autoTable(doc, {
-    startY: y,
-    margin: { left: M, right: M },
-    head: [['Item', 'Qty', 'Unit price', 'Total']],
-    body: q.line_items.map((i) => [
-      pdfText(i.description),
-      pdfText(`${i.quantity}${i.unit && i.unit !== 'each' ? ' ' + i.unit : ''}`),
-      money(i.unit_price_pence),
-      money(Math.round(i.quantity * i.unit_price_pence)),
-    ]),
-    theme: 'plain',
-    styles: { font: 'helvetica', fontSize: 9.5, textColor: NAVY, cellPadding: { top: 2.6, bottom: 2.6, left: 3, right: 3 } },
-    headStyles: { fillColor: NAVY, textColor: MIST, fontStyle: 'bold', fontSize: 8.5 },
-    alternateRowStyles: { fillColor: MIST },
-    columnStyles: { 1: { halign: 'right', cellWidth: 30 }, 2: { halign: 'right', cellWidth: 30 }, 3: { halign: 'right', cellWidth: 30 } },
-    didParseCell: (data) => { if (data.section === 'head' && data.column.index > 0) data.cell.styles.halign = 'right'; },
-  });
-  y = doc.lastAutoTable.finalY + 8;
-
-  // Totals, right-aligned.
-  const rows = [];
-  if (t.lines !== t.subtotal) rows.push(['Discount', '-' + money(t.lines - t.subtotal)]);
-  rows.push(['Subtotal', money(t.subtotal)]);
-  if (t.vat) rows.push([`VAT (${q.vat_rate_percent}%)`, money(t.vat)]);
-  rows.push(['Total', money(t.total), 'grand']);
-  if (t.deposit) rows.push([depositLabel(t, q.deposit_percent, q.deposit_fixed_pence), money(t.deposit)]);
-  if (q.final_payment_due && t.deposit < t.total) {
-    rows.push([`${t.deposit ? 'Balance' : 'Payment'} due by ${formatDate(q.final_payment_due)}`, money(t.total - t.deposit)]);
-  }
-  const labelX = pageW - M - 80;
-  const ensureSpace = (needed) => {
-    if (y + needed > pageH - 22) { doc.addPage(); y = M + 6; }
-  };
-  ensureSpace(rows.length * 7 + 6);
-  rows.forEach(([label, value, kind]) => {
-    if (kind === 'grand') {
-      doc.setDrawColor(...TINT);
-      doc.line(labelX, y - 4.5, pageW - M, y - 4.5);
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(12);
-    } else {
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(9.5);
+    const t = computeTotals(items, toPence(document.getElementById('discount').value),
+      Number(document.getElementById('vat').value), Number(document.getElementById('deposit').value), fixedDeposit());
+    const hasDeposit = t.deposit > 0 && t.deposit < t.total;
+    const hasLive = (kind) => live.some((i) => i.kind === kind);
+    // Suggest the next invoice: deposit first, then the balance once the deposit is paid.
+    const suggested = !hasDeposit ? 'full' : !hasLive('deposit') ? 'deposit' : 'balance';
+    const newBox = document.getElementById('invoice-new');
+    if (collect().status !== 'accepted') {
+      newBox.innerHTML = '<p class="muted">Set the quote to accepted to issue invoices.</p>';
+      return;
     }
-    doc.setTextColor(...NAVY);
-    doc.text(pdfText(label), labelX, y);
-    doc.text(value, pageW - M, y, { align: 'right' });
-    y += kind === 'grand' ? 8 : 6;
-  });
-  y += 4;
-
-  // Notes and terms.
-  const section = (title, body) => {
-    if (!String(body || '').trim()) return;
-    const lines = doc.setFont('helvetica', 'normal').setFontSize(9.5).splitTextToSize(pdfText(body), pageW - 2 * M);
-    ensureSpace(12);
-    doc.setFont('times', 'normal');
-    doc.setFontSize(13);
-    doc.setTextColor(...NAVY);
-    doc.text(title, M, y);
-    y += 6;
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(9.5);
-    doc.setTextColor(...SLATE);
-    lines.forEach((line) => {
-      ensureSpace(5);
-      doc.text(line, M, y);
-      y += 4.6;
+    if (live.some((i) => i.kind === 'full') || hasLive('balance')) {
+      newBox.innerHTML = '<p class="muted">This booking has been fully invoiced.</p>';
+      return;
+    }
+    newBox.innerHTML = `
+      <div class="grid">
+        <label>Invoice for<select id="inv-kind">
+          ${hasDeposit && !hasLive('deposit') ? '<option value="deposit">Deposit</option>' : ''}
+          ${hasDeposit ? '<option value="balance">Balance (after the deposit)</option>' : ''}
+          ${!hasLive('deposit') ? '<option value="full">Full amount</option>' : ''}
+        </select></label>
+        <label>Invoice date<input id="inv-issued" type="date" value="${isoToday()}"></label>
+        <label>Due<input id="inv-due" type="date"></label>
+        <label class="inv-balance">Deposit paid £<input id="inv-dep" type="number" step="0.01" min="0"></label>
+        <label class="inv-balance">Deposit paid on<input id="inv-dep-on" type="date"></label>
+      </div>
+      <p class="muted" id="inv-summary"></p>
+      <button id="inv-create" class="primary">Issue invoice</button>`;
+    const kindEl = document.getElementById('inv-kind');
+    if ([...kindEl.options].some((o) => o.value === suggested)) kindEl.value = suggested;
+    const dueEl = document.getElementById('inv-due');
+    const depEl = document.getElementById('inv-dep');
+    const depOnEl = document.getElementById('inv-dep-on');
+    depEl.value = toPounds(paidDeposit ? paidDeposit.amount_due_pence : t.deposit);
+    depOnEl.value = paidDeposit ? paidDeposit.paid_on : '';
+    const refresh = () => {
+      const kind = kindEl.value;
+      app.querySelectorAll('.inv-balance').forEach((el) => { el.style.display = kind === 'balance' ? '' : 'none'; });
+      // Deposits are due on receipt; balances and full payments by the final payment date.
+      dueEl.value = kind === 'deposit' ? document.getElementById('inv-issued').value : (payDue.value || document.getElementById('inv-issued').value);
+      const amount = kind === 'deposit' ? t.deposit : kind === 'balance' ? t.total - toPence(depEl.value) : t.total;
+      document.getElementById('inv-summary').textContent = `Amount due: ${money(amount)}. The invoice is a copy of the quote as it is now, so save any changes first.`;
+    };
+    kindEl.addEventListener('change', refresh);
+    depEl.addEventListener('input', refresh);
+    document.getElementById('inv-issued').addEventListener('change', refresh);
+    refresh();
+    document.getElementById('inv-create').addEventListener('click', async (e) => {
+      e.target.disabled = true;
+      try {
+        if (unsavedChanges) await save();
+        const res = await api(`/api/quotes/${id}/invoices`, { method: 'POST', json: {
+          kind: kindEl.value, issued_on: document.getElementById('inv-issued').value, due_on: dueEl.value,
+          deposit_paid_pence: toPence(depEl.value), deposit_paid_on: depOnEl.value,
+        } });
+        toast('Invoice issued');
+        location.hash = `#/invoice/${res.id}`;
+      } catch (err) {
+        toast(err.message, true);
+        e.target.disabled = false;
+      }
     });
-    y += 4;
-  };
-  section('Notes', q.client_notes);
-  section('Terms', settings.quote_terms);
-
-  // Footer on every page.
-  const pages = doc.getNumberOfPages();
-  for (let i = 1; i <= pages; i++) {
-    doc.setPage(i);
-    doc.setDrawColor(...TINT);
-    doc.line(M, pageH - 14, pageW - M, pageH - 14);
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(8);
-    doc.setTextColor(...SLATE);
-    doc.text(pdfText(`${settings.business_name}  ·  beyondscrumptious.com`), M, pageH - 9);
-    if (pages > 1) doc.text(`Page ${i} of ${pages}`, pageW - M, pageH - 9, { align: 'right' });
   }
+  app.querySelector('[data-field="status"]').addEventListener('change', () => renderInvoices().catch(() => {}));
 
-  doc.setProperties({ title: `${settings.business_name} quote ${q.reference}`, author: settings.business_name });
-  doc.save(safeFileName(`${settings.business_name} Quote ${q.reference}${q.client_name ? ' - ' + q.client_name : ''}`) + '.pdf');
+  renderLines();
+  renderInvoices().catch((err) => { document.getElementById('invoice-list').innerHTML = `<div class="warn">${esc(err.message)}</div>`; });
+}
+
+const INVOICE_KIND_LABELS = { deposit: 'Deposit', balance: 'Balance', full: 'Full amount' };
+
+async function downloadInvoice(invoiceId, button) {
+  if (button) button.disabled = true;
+  try {
+    const [inv, settings] = await Promise.all([api(`/api/invoices/${invoiceId}`), api('/api/settings')]);
+    if (!settings.bank_account_number && !confirm('Your bank details are not set up in Settings yet, so the invoice will show blank payment details. Download anyway?')) return;
+    await downloadInvoiceDocument(inv, settings);
+  } catch (err) {
+    toast(`Couldn't make the PDF: ${err.message}`, true);
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+// ---------- invoices ----------
+
+async function renderInvoicesList() {
+  const wanted = new URLSearchParams(location.hash.split('?')[1] || '').get('status') || '';
+  const rows = await api(`/api/invoices?status=${encodeURIComponent(wanted)}`);
+  const today = isoToday();
+  app.innerHTML = `
+    <div class="row"><h1>Invoices</h1><span class="spacer"></span>
+      <select id="inv-status" style="width:auto">
+        <option value="">All</option><option value="issued">Unpaid</option><option value="paid">Paid</option><option value="void">Void</option>
+      </select></div>
+    <p class="muted">Issue invoices from an accepted quote's page. Each one is a frozen copy of its quote, so later edits to the quote don't change it.</p>
+    <div class="panel"><div class="table-wrap"><table>
+      <thead><tr><th>Invoice</th><th>Client</th><th>Type</th><th>Issued</th><th>Due</th><th class="num">Amount</th><th>Status</th></tr></thead>
+      <tbody>${rows.length ? rows.map((i) => `
+        <tr class="clickable" data-id="${i.id}">
+          <td>${esc(i.number)}<div class="muted">${esc(i.quote_reference)}</div></td><td>${esc(i.client_name)}</td>
+          <td>${esc(INVOICE_KIND_LABELS[i.kind])}</td><td>${esc(formatDate(i.issued_on))}</td>
+          <td>${esc(formatDate(i.due_on))}${i.status === 'issued' && i.due_on < today ? ' <span class="flag">Overdue</span>' : ''}</td>
+          <td class="num">${money(i.amount_due_pence)}</td><td>${badge(i.status === 'issued' ? 'unpaid' : i.status)}</td>
+        </tr>`).join('') : '<tr><td colspan="7" class="muted">No invoices yet.</td></tr>'}</tbody>
+    </table></div></div>`;
+  const select = document.getElementById('inv-status');
+  select.value = wanted;
+  select.addEventListener('change', () => { location.hash = `#/invoices${select.value ? '?status=' + select.value : ''}`; });
+  app.querySelector('tbody').addEventListener('click', (e) => {
+    const tr = e.target.closest('tr[data-id]');
+    if (tr) location.hash = `#/invoice/${tr.dataset.id}`;
+  });
+}
+
+async function renderInvoice(invoiceId) {
+  const [inv, fa] = await Promise.all([api(`/api/invoices/${invoiceId}`), api('/api/freeagent/status')]);
+  const s = inv.snapshot;
+  const overdue = inv.status === 'issued' && inv.due_on < isoToday();
+  app.innerHTML = `
+    <div class="row">
+      <h1>${esc(inv.number)}</h1>${badge(inv.status === 'issued' ? 'unpaid' : inv.status)}${overdue ? ' <span class="flag">Overdue</span>' : ''}
+      <span class="spacer"></span>
+      <a class="button" href="#/quote/${inv.quote_id}">View quote ${esc(s.quote_reference)}</a>
+      ${/^https:\/\/[a-z0-9-]+\.freeagent\.com\//.test(inv.freeagent_url || '') ? `<a class="button" href="${esc(inv.freeagent_url)}" target="_blank" rel="noopener noreferrer">Open in FreeAgent</a>` : ''}
+      ${fa.connected && !inv.freeagent_status && inv.status !== 'void' ? '<button id="inv-fa">Send to FreeAgent</button>' : ''}
+      <button id="inv-pdf" class="primary">Download PDF</button>
+    </div>
+    <p class="muted">${esc(INVOICE_KIND_LABELS[inv.kind])} invoice · issued ${esc(formatDate(inv.issued_on))} by ${esc(inv.created_by)}${inv.freeagent_sent_at ? ` · in FreeAgent since ${esc(formatDate(inv.freeagent_sent_at))}` : ''}</p>
+    <div class="panel">
+      <div class="grid">
+        <div><div class="muted">Billed to</div>${esc(s.client_name)}<div class="muted">${esc(s.client_email)}</div></div>
+        <div><div class="muted">Event</div>${esc(s.event_type)}<div class="muted">${esc(formatDate(s.event_date))}</div></div>
+        <div><div class="muted">Due</div>${esc(formatDate(inv.due_on))}</div>
+        <div><div class="muted">${inv.kind === 'deposit' ? 'Deposit due' : inv.kind === 'balance' ? 'Balance due' : 'Amount due'}</div>
+          <div style="font: 400 26px/1.2 var(--font-head)">${money(inv.amount_due_pence)}</div>
+          ${inv.kind === 'balance' ? `<div class="muted">Total ${money(inv.total_pence)} less ${money(inv.deposit_paid_pence)} deposit paid</div>` : ''}</div>
+      </div>
+    </div>
+    ${inv.status === 'void' ? '<div class="warn">This invoice is void. Its number won’t be reused.</div>' : `
+    <div class="panel">
+      <h2 style="margin-top:0">Payment</h2>
+      ${inv.status === 'paid'
+        ? `<p>Paid on <strong>${esc(formatDate(inv.paid_on))}</strong>.</p><button id="inv-unpaid">Mark as unpaid</button>`
+        : `<div class="row"><label>Paid on<input id="inv-paid-on" type="date" value="${isoToday()}"></label>
+            <button id="inv-paid" class="primary" style="align-self:flex-end">Mark as paid</button></div>`}
+      ${inv.freeagent_status ? '<p class="muted">Record the payment in FreeAgent too (usually by matching the bank transaction).</p>' : ''}
+      <hr style="border:0;border-top:1px solid var(--border);margin:16px 0">
+      <button id="inv-void" class="danger admin-only">Void invoice</button>
+      <span class="muted admin-only">Use this if it was issued by mistake.${inv.freeagent_status ? ' Cancel it in FreeAgent as well.' : ''}</span>
+    </div>`}`;
+
+  document.getElementById('inv-pdf').addEventListener('click', (e) => downloadInvoice(invoiceId, e.target));
+  const setStatus = async (status, paidOn) => {
+    try {
+      await api(`/api/invoices/${invoiceId}/status`, { method: 'POST', json: { status, paid_on: paidOn } });
+      toast(status === 'paid' ? 'Marked as paid' : 'Marked as unpaid');
+      route();
+    } catch (err) { toast(err.message, true); }
+  };
+  const paid = document.getElementById('inv-paid');
+  if (paid) paid.addEventListener('click', () => setStatus('paid', document.getElementById('inv-paid-on').value));
+  const unpaid = document.getElementById('inv-unpaid');
+  if (unpaid) unpaid.addEventListener('click', () => setStatus('issued', ''));
+  const voidBtn = document.getElementById('inv-void');
+  if (voidBtn) voidBtn.addEventListener('click', async () => {
+    if (!confirm(`Void ${inv.number}? It stays on record as void and the number isn't reused. This can't be undone.`)) return;
+    try { await api(`/api/invoices/${invoiceId}/void`, { method: 'POST' }); toast('Invoice voided'); route(); } catch (err) { toast(err.message, true); }
+  });
+  const faBtn = document.getElementById('inv-fa');
+  if (faBtn) faBtn.addEventListener('click', async () => {
+    if (!confirm(`Create ${inv.number} in FreeAgent for your accounts? FreeAgent won't email the client.`)) return;
+    faBtn.disabled = true;
+    faBtn.textContent = 'Sending…';
+    try {
+      const res = await api(`/api/invoices/${invoiceId}/freeagent`, { method: 'POST' });
+      toast('Created in FreeAgent');
+      route();
+      if (res.url) window.open(res.url, '_blank', 'noopener');
+    } catch (err) { toast(err.message, true); route(); }
+  });
 }
 
 // ---------- SOP ----------
@@ -999,6 +1019,18 @@ async function renderSettings() {
       </div><br>
       <label>Terms printed on every quote<textarea id="quote_terms" style="min-height:160px">${esc(s.quote_terms)}</textarea></label><br>
       <p class="muted">VAT and deposit changes apply to new quotes; existing quotes keep their own values.</p>
+      <h2>On quotes and invoices</h2>
+      <div class="grid">
+        <label>Contact lines (top right, one per line)<textarea id="contact_lines" style="min-height:96px">${esc(s.contact_lines)}</textarea></label>
+        <label>Footer line<input id="footer_tagline" value="${esc(s.footer_tagline)}"></label>
+        <label>Email for questions<input id="questions_email" type="email" value="${esc(s.questions_email)}"></label>
+      </div>
+      <h2>Bank details for invoices</h2>
+      <div class="grid">
+        <label>Account name<input id="bank_account_name" value="${esc(s.bank_account_name)}" autocomplete="off"></label>
+        <label>Sort code<input id="bank_sort_code" value="${esc(s.bank_sort_code)}" placeholder="00-00-00" autocomplete="off"></label>
+        <label>Account number<input id="bank_account_number" value="${esc(s.bank_account_number)}" inputmode="numeric" autocomplete="off"></label>
+      </div><br>
       <button id="save" class="primary admin-only">Save settings</button>
       <p class="admin-note">Only admins can change settings.</p>
     </div>
@@ -1024,6 +1056,8 @@ async function renderSettings() {
     await api('/api/settings', { method: 'PUT', json: {
       business_name: v('business_name'), vat_rate_percent: Number(v('vat_rate_percent')),
       deposit_percent: Number(v('deposit_percent')), quote_valid_days: Number(v('quote_valid_days')), quote_terms: v('quote_terms'),
+      contact_lines: v('contact_lines'), footer_tagline: v('footer_tagline'), questions_email: v('questions_email'),
+      bank_account_name: v('bank_account_name'), bank_sort_code: v('bank_sort_code'), bank_account_number: v('bank_account_number'),
     } });
     toast('Settings saved');
   });

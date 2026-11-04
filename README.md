@@ -137,6 +137,16 @@ You can also paste a chat or upload an export under **New enquiry**.
 
 Chats contain clients' personal data. They're stored in your D1 database and sent to the Claude API to draft the quote. Mention this in your privacy notice. Delete old enquiries from the Inbox when you no longer need them.
 
+## Quotes and invoices on the brand template
+
+Quotes and invoices download as PDFs on the Beyond Scrumptious template: wordmark and contact lines, the powder-blue band, Billed to / For, items, totals, bank transfer details and Good to know. They use DM Sans, Playfair Display and Cormorant Garamond, built into the PDF from `public/vendor/fonts/` (Latin-only copies of the Google Fonts files, under the SIL Open Font Licence).
+
+- **Issuing invoices:** open an accepted quote and use **Invoices**. Issue a **deposit** invoice (due on receipt) and later a **balance** invoice (due by the final payment date, with the paid deposit taken off), or a single **full** invoice. Numbers run INV-0001, INV-0002, and so on.
+- **Invoices are frozen:** each one copies the quote as it was when issued, so editing the quote later never changes it. Invoices can be voided by an admin but never deleted, so numbers aren't reused, and a quote with invoices can't be deleted.
+- **Paid / unpaid:** mark invoices paid on the invoice's page. Unpaid and overdue invoices show on the home page and under **Invoices**.
+- **FreeAgent:** **Send to FreeAgent** on an invoice creates it there with the same number and marks it as sent, for the accounts. FreeAgent doesn't email the client; the client gets the PDF from the app. Record payments in FreeAgent as usual.
+- **Settings:** bank details, the contact lines, the footer line and the questions email that appear on the documents.
+
 ## Security
 
 - **Sign-in:** Cloudflare Access only lets `@beyondscrumptious.com` emails in, and the app re-checks Access's signed token (RS256) on every request. `DEV_USER_EMAIL` is for local testing only, and it's ignored whenever a request arrives through Access.

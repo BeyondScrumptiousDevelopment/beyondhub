@@ -1,6 +1,7 @@
 import type { Env } from './env';
 import type { QuoteRow } from './db';
 import type { LineItem } from './pricing';
+import type { InvoiceRow, InvoiceSnapshot } from './invoices';
 import { UserError } from './security';
 
 const DEFAULT_API_BASE = 'https://api.freeagent.com/v2';
@@ -211,7 +212,9 @@ function cleanSubdomain(value: string | undefined): string {
 const digits = (s: string | undefined) => (s ?? '').replace(/\D/g, '').replace(/^44/, '0');
 
 /** Finds the client among existing FreeAgent contacts by email, then phone, then name; creates them otherwise. */
-async function findOrCreateContact(env: Env, token: string, q: QuoteRow): Promise<string> {
+type ClientDetails = Pick<QuoteRow, 'client_name' | 'client_email' | 'client_phone'>;
+
+async function findOrCreateContact(env: Env, token: string, q: ClientDetails): Promise<string> {
   const email = q.client_email.trim().toLowerCase();
   const phone = digits(q.client_phone);
   const name = q.client_name.trim().toLowerCase();
@@ -319,4 +322,95 @@ export async function sendQuote(
     );
   }
   return sent;
+}
+
+// --- Sending an invoice (for the accounts) ------------------------------------------
+
+function lineItemsFor(s: InvoiceSnapshot) {
+  const items = s.line_items.map((i) => ({
+    item_type: 'Products',
+    quantity: String(i.quantity),
+    price: (i.unit_price_pence / 100).toFixed(2),
+    description: i.unit && i.unit !== 'each' ? `${i.description} (${i.unit})` : i.description,
+  }));
+  if (s.discount_pence > 0) {
+    items.push({ item_type: 'Products', quantity: '1', price: (-s.discount_pence / 100).toFixed(2), description: 'Discount' });
+  }
+  return items;
+}
+
+function daysBetween(from: string, to: string): number {
+  return Math.max(0, Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000));
+}
+
+/**
+ * Creates the invoice in FreeAgent with the same number as the app's PDF, and marks it as sent
+ * so it counts in the accounts. FreeAgent doesn't email the client; the PDF from the app is
+ * what the client receives.
+ */
+export async function sendInvoice(
+  env: Env,
+  inv: InvoiceRow,
+  onCreated: (webUrl: string) => Promise<void>,
+): Promise<string> {
+  const s = JSON.parse(inv.snapshot) as InvoiceSnapshot;
+  const conn = await accessToken(env);
+  const token = conn.access_token;
+  const contact = await findOrCreateContact(env, token, s);
+
+  let items: { item_type: string; quantity: string; price: string; description: string }[];
+  if (inv.kind === 'deposit') {
+    items = [{
+      item_type: 'Products',
+      quantity: '1',
+      price: (inv.amount_due_pence / 100).toFixed(2),
+      description: `Deposit to secure ${s.event_type || 'your booking'}${s.event_date ? ` on ${s.event_date}` : ''} (quote ${s.quote_reference})`,
+    }];
+  } else {
+    items = lineItemsFor(s);
+    if (inv.kind === 'balance' && inv.deposit_paid_pence > 0) {
+      items.push({
+        item_type: 'Products',
+        quantity: '1',
+        price: (-inv.deposit_paid_pence / 100).toFixed(2),
+        description: `Less deposit paid${inv.deposit_paid_on ? ` on ${inv.deposit_paid_on}` : ''}`,
+      });
+    }
+  }
+
+  const comments = [
+    s.event_type && `Event: ${s.event_type}`,
+    s.event_date && `Date: ${s.event_date}`,
+    s.venue && `Venue: ${s.venue}`,
+    `Quote: ${s.quote_reference}`,
+  ].filter(Boolean).join('\n');
+
+  const { invoice } = await fetchJson<{ invoice: { url: string } }>(env, token, 'POST', '/invoices', {
+    invoice: {
+      contact,
+      dated_on: inv.issued_on,
+      payment_terms_in_days: daysBetween(inv.issued_on, inv.due_on),
+      reference: inv.number,
+      currency: 'GBP',
+      comments,
+      invoice_items: items,
+    },
+  });
+
+  const path = new URL(invoice.url).pathname.replace(/^\/v2/, '');
+  if (!/^\/invoices\/\d+$/.test(path)) throw new UserError('FreeAgent returned an unexpected invoice address.', 502);
+  const id = path.split('/').pop();
+  const subdomain = cleanSubdomain(conn.company_subdomain);
+  const webUrl = subdomain ? `https://${subdomain}.freeagent.com/invoices/${id}` : '';
+  await onCreated(webUrl);
+
+  try {
+    await fetchJson(env, token, 'PUT', `${path}/transitions/mark_as_sent`, {});
+  } catch (err) {
+    throw new UserError(
+      `The invoice is in FreeAgent as a draft, but it couldn't be marked as sent. Open it in FreeAgent and mark it as sent there. (${err instanceof Error ? err.message : err})`,
+      502,
+    );
+  }
+  return webUrl;
 }

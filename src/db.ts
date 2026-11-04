@@ -8,6 +8,12 @@ export interface Settings {
   deposit_percent: number;
   quote_valid_days: number;
   quote_terms: string;
+  contact_lines: string;
+  footer_tagline: string;
+  questions_email: string;
+  bank_account_name: string;
+  bank_sort_code: string;
+  bank_account_number: string;
 }
 
 export interface QuoteRow {
@@ -18,6 +24,7 @@ export interface QuoteRow {
   client_name: string;
   client_phone: string;
   client_email: string;
+  client_address: string;
   event_type: string;
   event_date: string;
   event_time: string;
@@ -56,7 +63,9 @@ export async function getSop(db: D1Database): Promise<string> {
 
 export async function getSettings(db: D1Database): Promise<Settings> {
   const row = await db
-    .prepare('SELECT business_name, vat_rate_percent, deposit_percent, quote_valid_days, quote_terms FROM settings WHERE id = 1')
+    .prepare(`SELECT business_name, vat_rate_percent, deposit_percent, quote_valid_days, quote_terms, contact_lines,
+       footer_tagline, questions_email, bank_account_name, bank_sort_code, bank_account_number
+     FROM settings WHERE id = 1`)
     .first<Settings>();
   if (!row) throw new Error('Settings row missing: run the database migrations.');
   return row;
@@ -97,14 +106,14 @@ export async function createQuoteFromDraft(
     try {
       const row = await db
         .prepare(
-          `INSERT INTO quotes (reference, enquiry_id, client_name, client_phone, client_email, event_type,
+          `INSERT INTO quotes (reference, enquiry_id, client_name, client_phone, client_email, client_address, event_type,
             event_date, event_time, venue, guests, summary, line_items, vat_rate_percent, deposit_percent,
             deposit_fixed_pence, subtotal_pence, vat_pence, total_pence, client_notes, internal_notes, questions, reply_message,
             created_by, updated_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
         )
         .bind(
-          reference, enquiryId, draft.client_name, draft.client_phone, draft.client_email, draft.event_type,
+          reference, enquiryId, draft.client_name, draft.client_phone, draft.client_email, draft.client_address, draft.event_type,
           draft.event_date, draft.event_time, draft.venue, draft.guests, draft.summary, JSON.stringify(items),
           settings.vat_rate_percent, depositPercent, draft.deposit_fixed_pence, totals.subtotal_pence, totals.vat_pence,
           totals.total_pence, draft.client_notes, draft.internal_notes, JSON.stringify(draft.questions),
@@ -123,6 +132,7 @@ export interface QuoteUpdate {
   client_name: string;
   client_phone: string;
   client_email: string;
+  client_address: string;
   event_type: string;
   event_date: string;
   event_time: string;
@@ -150,7 +160,7 @@ export async function updateQuote(db: D1Database, id: number, q: QuoteUpdate, up
   const result = await db
     .prepare(
       `UPDATE quotes SET status_changed_at = CASE WHEN status <> ? THEN datetime('now') ELSE status_changed_at END,
-        status = ?, client_name = ?, client_phone = ?, client_email = ?, event_type = ?,
+        status = ?, client_name = ?, client_phone = ?, client_email = ?, client_address = ?, event_type = ?,
         event_date = ?, event_time = ?, venue = ?, guests = ?, summary = ?, line_items = ?, discount_pence = ?,
         vat_rate_percent = ?, deposit_percent = ?, deposit_fixed_pence = ?, subtotal_pence = ?, vat_pence = ?, total_pence = ?,
         client_notes = ?, internal_notes = ?, questions = ?, reply_message = ?, final_payment_due = ?, payment_rule = ?, updated_by = ?,
@@ -158,7 +168,7 @@ export async function updateQuote(db: D1Database, id: number, q: QuoteUpdate, up
        WHERE id = ?`,
     )
     .bind(
-      q.status, q.status, q.client_name, q.client_phone, q.client_email, q.event_type, q.event_date, q.event_time,
+      q.status, q.status, q.client_name, q.client_phone, q.client_email, q.client_address, q.event_type, q.event_date, q.event_time,
       q.venue, q.guests, q.summary, JSON.stringify(q.line_items), q.discount_pence, q.vat_rate_percent,
       q.deposit_percent, q.deposit_fixed_pence, totals.subtotal_pence, totals.vat_pence, totals.total_pence, q.client_notes,
       q.internal_notes, JSON.stringify(q.questions), q.reply_message, q.final_payment_due, q.payment_rule, updatedBy, id,
