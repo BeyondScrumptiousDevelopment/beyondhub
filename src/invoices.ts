@@ -76,11 +76,56 @@ export function snapshotQuote(q: QuoteRow): InvoiceSnapshot {
   };
 }
 
-async function nextInvoiceNumber(db: D1Database): Promise<string> {
+/** An invoice number sequence: prefix + zero-padded number, e.g. "INV-" 46 width 4 = INV-0046. */
+export interface NumberSequence {
+  prefix: string;
+  next: number;
+  width: number;
+}
+
+/** Splits a reference like "INV-0045" or "045" into its prefix and trailing number. */
+export function parseReference(reference: string): { prefix: string; number: number; width: number } | null {
+  const m = /^(.*?)(\d{1,9})$/.exec(reference.trim());
+  return m ? { prefix: m[1], number: Number(m[2]), width: m[2].length } : null;
+}
+
+export function formatReference(seq: NumberSequence, n = seq.next): string {
+  return `${seq.prefix}${String(n).padStart(seq.width, '0')}`;
+}
+
+export async function getNumbering(db: D1Database): Promise<NumberSequence> {
   const row = await db
-    .prepare("SELECT MAX(CAST(substr(number, 5) AS INTEGER)) AS n FROM invoices WHERE number LIKE 'INV-%'")
-    .first<{ n: number | null }>();
-  return `INV-${String((row?.n ?? 0) + 1).padStart(4, '0')}`;
+    .prepare('SELECT invoice_prefix AS prefix, invoice_next_number AS next, invoice_number_width AS width FROM settings WHERE id = 1')
+    .first<NumberSequence>();
+  return row ?? { prefix: 'INV-', next: 1, width: 4 };
+}
+
+export async function setNumbering(db: D1Database, seq: NumberSequence): Promise<void> {
+  await db
+    .prepare('UPDATE settings SET invoice_prefix = ?, invoice_next_number = ?, invoice_number_width = ? WHERE id = 1')
+    .bind(seq.prefix, seq.next, seq.width)
+    .run();
+}
+
+/**
+ * The next free number: the settings' next number, never below one already used in the app, and
+ * never below FreeAgent's next number when FreeAgent was checked (its prefix and padding win, so the
+ * two always match).
+ */
+export async function nextInvoiceSequence(db: D1Database, freeAgentNext: NumberSequence | null): Promise<NumberSequence> {
+  const own = await getNumbering(db);
+  const seq = freeAgentNext
+    ? { prefix: freeAgentNext.prefix, width: freeAgentNext.width, next: freeAgentNext.prefix === own.prefix ? Math.max(own.next, freeAgentNext.next) : freeAgentNext.next }
+    : own;
+  const { results } = await db
+    .prepare('SELECT number FROM invoices WHERE substr(number, 1, ?) = ?')
+    .bind(seq.prefix.length, seq.prefix)
+    .all<{ number: string }>();
+  const usedMax = results.reduce((max, r) => {
+    const parsed = parseReference(r.number);
+    return parsed && parsed.prefix === seq.prefix ? Math.max(max, parsed.number) : max;
+  }, 0);
+  return { ...seq, next: Math.max(seq.next, usedMax + 1) };
 }
 
 export interface NewInvoice {
@@ -103,7 +148,14 @@ export async function paidDeposit(db: D1Database, quoteId: number) {
     .first<{ amount_due_pence: number; paid_on: string; number: string }>();
 }
 
-export async function createInvoice(db: D1Database, quote: QuoteRow, input: NewInvoice, by: string): Promise<number> {
+export async function createInvoice(
+  db: D1Database,
+  quote: QuoteRow,
+  input: NewInvoice,
+  by: string,
+  /** FreeAgent's next invoice number, when FreeAgent is connected. */
+  freeAgentNext: NumberSequence | null = null,
+): Promise<{ id: number; number: string }> {
   if (quote.status !== 'accepted') throw new UserError('Only accepted quotes can be invoiced. Set the quote to accepted first.', 409);
   const snapshot = snapshotQuote(quote);
   if (!snapshot.line_items.length || snapshot.total_pence <= 0) throw new UserError('This quote has nothing to invoice yet.');
@@ -140,7 +192,8 @@ export async function createInvoice(db: D1Database, quote: QuoteRow, input: NewI
 
   // Retry on the rare clash when two invoices are issued at the same moment.
   for (let attempt = 0; ; attempt++) {
-    const number = await nextInvoiceNumber(db);
+    const seq = await nextInvoiceSequence(db, freeAgentNext);
+    const number = formatReference(seq);
     try {
       const row = await db
         .prepare(
@@ -153,7 +206,8 @@ export async function createInvoice(db: D1Database, quote: QuoteRow, input: NewI
           amountDue, JSON.stringify(snapshot), by, by,
         )
         .first<{ id: number }>();
-      return row!.id;
+      await setNumbering(db, { ...seq, next: seq.next + 1 });
+      return { id: row!.id, number };
     } catch (err) {
       if (attempt >= 3 || !String(err).includes('UNIQUE')) throw err;
     }

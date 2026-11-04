@@ -11,7 +11,10 @@ import {
 } from './db';
 import { sanitiseLineItems } from './pricing';
 import * as freeagent from './freeagent';
-import { INVOICE_KINDS, createInvoice, invoiceToJson, paidDeposit, type InvoiceKind, type InvoiceRow } from './invoices';
+import {
+  INVOICE_KINDS, createInvoice, formatReference, invoiceToJson, nextInvoiceSequence, paidDeposit, setNumbering,
+  type InvoiceKind, type InvoiceRow, type NumberSequence,
+} from './invoices';
 import {
   UserError, checkDailyDraftCap, isAdmin, parseId, publicMessage, rateLimit, requireAdmin, securityHeaders,
 } from './security';
@@ -428,19 +431,59 @@ app.post('/api/quotes/:id/invoices', async (c) => {
   if (!issuedOn || !dueOn) throw new UserError('Enter the invoice date and the due date.');
   const quote = await c.env.DB.prepare('SELECT * FROM quotes WHERE id = ?').bind(id).first<QuoteRow>();
   if (!quote) throw new UserError('Not found', 404);
-  const invoiceId = await createInvoice(c.env.DB, quote, {
+  // With FreeAgent connected, continue its invoice sequence so the numbers always match.
+  let freeAgentNext: NumberSequence | null = null;
+  let warning = '';
+  if ((await freeagent.connectionStatus(c.env)).connected) {
+    try {
+      freeAgentNext = (await freeagent.nextFreeAgentInvoiceNumber(c.env))?.next ?? null;
+    } catch (err) {
+      console.error('Could not read FreeAgent invoice numbers', err);
+      warning = "Couldn't check FreeAgent's latest invoice number, so the app's own sequence was used. Check it matches before sending.";
+    }
+  }
+  const created = await createInvoice(c.env.DB, quote, {
     kind,
     issued_on: issuedOn,
     due_on: dueOn,
     deposit_paid_pence: Math.min(100_000_000, Math.max(0, Math.round(num(b.deposit_paid_pence)))),
     deposit_paid_on: isoDate(b.deposit_paid_on),
-  }, c.get('userEmail'));
-  return c.json({ id: invoiceId }, 201);
+  }, c.get('userEmail'), freeAgentNext);
+  return c.json({ ...created, warning }, 201);
 });
 
 app.get('/api/invoices/:id', async (c) => {
   const row = await c.env.DB.prepare('SELECT * FROM invoices WHERE id = ?').bind(idParam(c.req.param('id'))).first<InvoiceRow>();
   return row ? c.json(invoiceToJson(row)) : c.json({ error: 'Not found' }, 404);
+});
+
+// The "next" shown is what the next invoice will really get: never a number already used.
+app.get('/api/invoice-numbering', async (c) => {
+  const seq = await nextInvoiceSequence(c.env.DB, null);
+  return c.json({ ...seq, next_reference: formatReference(seq) });
+});
+
+app.put('/api/invoice-numbering', requireAdmin, async (c) => {
+  const b = await c.req.json<Record<string, unknown>>();
+  const prefix = str(b.prefix, 12);
+  if (!/^[A-Za-z0-9 \-_/.]*$/.test(prefix)) throw new UserError('The prefix can use letters, numbers, spaces and - _ / . only.');
+  const seq = {
+    prefix,
+    next: Math.min(999_999_999, Math.max(1, Math.round(num(b.next, 1)))),
+    width: Math.min(9, Math.max(1, Math.round(num(b.width, 4)))),
+  };
+  await setNumbering(c.env.DB, seq);
+  const effective = await nextInvoiceSequence(c.env.DB, null);
+  return c.json({ ...effective, next_reference: formatReference(effective) });
+});
+
+/** Sets the next app invoice number to follow FreeAgent's latest one. */
+app.post('/api/invoice-numbering/match-freeagent', requireAdmin, async (c) => {
+  const found = await freeagent.nextFreeAgentInvoiceNumber(c.env);
+  if (!found) throw new UserError('FreeAgent has no invoices yet, so the app keeps its own numbering.', 404);
+  const seq = await nextInvoiceSequence(c.env.DB, found.next);
+  await setNumbering(c.env.DB, seq);
+  return c.json({ ...seq, next_reference: formatReference(seq), freeagent_latest: found.latest });
 });
 
 // Paid / not paid. Voided invoices stay void.

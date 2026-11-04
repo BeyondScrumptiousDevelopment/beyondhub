@@ -1,7 +1,7 @@
 import type { Env } from './env';
 import type { QuoteRow } from './db';
 import type { LineItem } from './pricing';
-import type { InvoiceRow, InvoiceSnapshot } from './invoices';
+import { parseReference, type InvoiceRow, type InvoiceSnapshot, type NumberSequence } from './invoices';
 import { UserError } from './security';
 
 const DEFAULT_API_BASE = 'https://api.freeagent.com/v2';
@@ -413,4 +413,38 @@ export async function sendInvoice(
     );
   }
   return webUrl;
+}
+
+// --- Following FreeAgent's invoice numbers ---------------------------------------------
+
+/**
+ * Reads existing FreeAgent invoices and returns the number that comes next in their sequence,
+ * keeping FreeAgent's prefix and zero-padding (e.g. latest "INV-0045" gives "INV-" 46, width 4).
+ * The prefix is taken from the most recent invoice, in case older ones used a different style.
+ */
+export async function nextFreeAgentInvoiceNumber(env: Env): Promise<{ next: NumberSequence; latest: string } | null> {
+  const conn = await accessToken(env);
+  const refs: { reference: string; dated_on: string; created_at: string }[] = [];
+  for (let page = 1; page <= 30; page++) {
+    const { invoices } = await fetchJson<{ invoices: { reference?: string; dated_on?: string; created_at?: string }[] }>(
+      env, conn.access_token, 'GET', `/invoices?view=all&per_page=100&page=${page}`,
+    );
+    for (const inv of invoices) {
+      if (inv.reference) refs.push({ reference: inv.reference, dated_on: inv.dated_on ?? '', created_at: inv.created_at ?? '' });
+    }
+    if (invoices.length < 100) break;
+  }
+  const parsed = refs
+    .map((r) => ({ ...r, parts: parseReference(r.reference) }))
+    .filter((r): r is typeof r & { parts: NonNullable<ReturnType<typeof parseReference>> } => r.parts !== null);
+  if (!parsed.length) return null;
+  const newest = [...parsed].sort((a, b) => (b.created_at || b.dated_on).localeCompare(a.created_at || a.dated_on))[0];
+  const prefix = newest.parts.prefix;
+  const best = parsed
+    .filter((r) => r.parts.prefix === prefix)
+    .reduce((a, b) => (b.parts.number > a.parts.number ? b : a));
+  return {
+    next: { prefix, next: best.parts.number + 1, width: best.parts.width },
+    latest: best.reference,
+  };
 }

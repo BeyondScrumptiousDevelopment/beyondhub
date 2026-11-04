@@ -799,7 +799,7 @@ async function renderQuote(id) {
           kind: kindEl.value, issued_on: document.getElementById('inv-issued').value, due_on: dueEl.value,
           deposit_paid_pence: toPence(depEl.value), deposit_paid_on: depOnEl.value,
         } });
-        toast('Invoice issued');
+        if (res.warning) toast(res.warning, true); else toast(`Invoice ${res.number} issued`);
         location.hash = `#/invoice/${res.id}`;
       } catch (err) {
         toast(err.message, true);
@@ -1006,7 +1006,7 @@ async function renderPrices() {
 // ---------- settings ----------
 
 async function renderSettings() {
-  const [s, fa] = await Promise.all([api('/api/settings'), api('/api/freeagent/status')]);
+  const [s, fa, numbering] = await Promise.all([api('/api/settings'), api('/api/freeagent/status'), api('/api/invoice-numbering')]);
   const faMessage = new URLSearchParams(location.hash.split('?')[1] || '').get('freeagent');
   app.innerHTML = `
     <h1>Settings</h1>
@@ -1034,6 +1034,23 @@ async function renderSettings() {
       <button id="save" class="primary admin-only">Save settings</button>
       <p class="admin-note">Only admins can change settings.</p>
     </div>
+    <h2>Invoice numbers</h2>
+    <div class="panel">
+      <p class="muted">${fa.connected
+        ? 'FreeAgent is connected, so each new invoice continues FreeAgent’s sequence and both show the same number.'
+        : 'Connect FreeAgent below and new invoices will follow its numbering automatically.'}</p>
+      <div class="grid">
+        <label>Prefix<input id="num-prefix" value="${esc(numbering.prefix)}" placeholder="INV-"></label>
+        <label>Next number<input id="num-next" type="number" min="1" step="1" value="${esc(numbering.next)}"></label>
+        <label>Digits<input id="num-width" type="number" min="1" max="9" step="1" value="${esc(numbering.width)}"></label>
+      </div>
+      <p>Next invoice: <strong id="num-preview">${esc(numbering.next_reference)}</strong></p>
+      <div class="row">
+        <button id="num-save" class="admin-only">Save numbering</button>
+        ${fa.connected ? '<button id="num-match" class="primary admin-only">Match FreeAgent</button>' : ''}
+        <span id="num-state" class="muted"></span>
+      </div>
+    </div>
     <h2>FreeAgent</h2>
     <div class="panel">
       ${faMessage ? `<div class="warn">${faMessage === 'connected' ? 'FreeAgent is connected.' : 'FreeAgent: ' + esc(faMessage)}</div><br>` : ''}
@@ -1044,6 +1061,31 @@ async function renderSettings() {
             <button id="fa-disconnect" class="danger admin-only">Disconnect</button>`
         : '<p class="muted">Click Connect, sign in to FreeAgent and click Allow. You only need to do this once.</p><a class="button primary admin-only" href="/api/freeagent/connect">Connect FreeAgent</a>'}
     </div>`;
+  const numFields = ['num-prefix', 'num-next', 'num-width'].map((n) => document.getElementById(n));
+  const preview = () => {
+    const [prefix, next, width] = numFields.map((f) => f.value);
+    document.getElementById('num-preview').textContent = `${prefix}${String(Math.max(1, Number(next) || 1)).padStart(Math.min(9, Math.max(1, Number(width) || 1)), '0')}`;
+  };
+  numFields.forEach((f) => f.addEventListener('input', preview));
+  document.getElementById('num-save').addEventListener('click', async () => {
+    try {
+      const res = await api('/api/invoice-numbering', { method: 'PUT', json: { prefix: numFields[0].value, next: Number(numFields[1].value), width: Number(numFields[2].value) } });
+      toast(`Next invoice will be ${res.next_reference}`);
+    } catch (err) { toast(err.message, true); }
+  });
+  const match = document.getElementById('num-match');
+  if (match) match.addEventListener('click', async () => {
+    match.disabled = true;
+    document.getElementById('num-state').textContent = 'Checking FreeAgent…';
+    try {
+      const res = await api('/api/invoice-numbering/match-freeagent', { method: 'POST' });
+      numFields[0].value = res.prefix; numFields[1].value = res.next; numFields[2].value = res.width; preview();
+      document.getElementById('num-state').textContent = `FreeAgent's latest is ${res.freeagent_latest}, so the next invoice will be ${res.next_reference}.`;
+    } catch (err) {
+      document.getElementById('num-state').textContent = '';
+      toast(err.message, true);
+    } finally { match.disabled = false; }
+  });
   const disconnect = document.getElementById('fa-disconnect');
   if (disconnect) disconnect.addEventListener('click', async () => {
     if (!confirm('Disconnect FreeAgent? You can reconnect any time.')) return;
