@@ -739,6 +739,8 @@ app.post('/api/quotes/:id/agreements', async (c) => {
   const { id, token } = await createAgreement(c.env.DB, quote, await getSettings(c.env.DB), {
     prep: (await loadPrep(c.env.DB, quote.id)).data,
     paymentReference: deposit?.number ?? '',
+    // The owner's signature is only applied when the owner (an admin) generates the agreement.
+    businessSignature: c.get('isAdmin') ? { name: 'Naavyen Patel', applied_by: c.get('userEmail') } : null,
   }, c.get('userEmail'));
   // With online signing off, the agreement is downloaded and sent by hand, so no link is given out.
   return c.json({ id, link: onlineSigning(c.env) ? signingLink(c, token) : '' }, 201);

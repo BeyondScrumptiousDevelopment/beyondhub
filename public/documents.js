@@ -42,14 +42,15 @@ function loadPdfAssets() {
   pdfAssets = pdfAssets || (async () => {
     await loadScript('/vendor/jspdf.umd.min.js');
     await loadScript('/vendor/jspdf.plugin.autotable.min.js');
-    const [dmSans, dmSansMedium, playfair, cormorant, logo] = await Promise.all([
+    const [dmSans, dmSansMedium, playfair, cormorant, allura, logo] = await Promise.all([
       fetchBase64('/vendor/fonts/DMSans-Regular.ttf'),
       fetchBase64('/vendor/fonts/DMSans-Medium.ttf'),
       fetchBase64('/vendor/fonts/PlayfairDisplay-Regular.ttf'),
       fetchBase64('/vendor/fonts/CormorantGaramond-LightItalic.ttf'),
+      fetchBase64('/vendor/fonts/Allura-Regular.ttf'),
       fetchBase64('/brand/wordmark-navy.png'),
     ]);
-    return { fonts: { dmSans, dmSansMedium, playfair, cormorant }, logo: `data:image/png;base64,${logo}` };
+    return { fonts: { dmSans, dmSansMedium, playfair, cormorant, allura }, logo: `data:image/png;base64,${logo}` };
   })();
   return pdfAssets.catch((err) => { pdfAssets = null; throw err; });
 }
@@ -62,6 +63,7 @@ function newBrandedDoc(assets) {
     ['DMSans-Medium.ttf', assets.fonts.dmSansMedium, 'DMSans', 'bold'],
     ['PlayfairDisplay-Regular.ttf', assets.fonts.playfair, 'Playfair', 'normal'],
     ['CormorantGaramond-LightItalic.ttf', assets.fonts.cormorant, 'Cormorant', 'italic'],
+    ['Allura-Regular.ttf', assets.fonts.allura, 'Allura', 'normal'], // signatures only
   ];
   for (const [file, data, name, style] of fonts) {
     doc.addFileToVFS(file, data);
@@ -639,11 +641,19 @@ async function downloadAgreementDocument(a, settings) {
     y += 16;
     line('Customer signature', L, R - L);
     y += 20;
+    const sig = c.business_signature;
     line('For Beyond Scrumptious: name', L, half, 'Naavyen Patel');
-    line('Date', L + half + 10, half);
+    line('Date', L + half + 10, half, sig ? docDate(sig.signed_on) : '');
     y += 16;
     line('Signature', L, R - L);
-    y += 16;
+    if (sig) {
+      // The owner's electronic signature, applied when they generated the agreement.
+      setFont(doc, 'Allura', 24, DOC.navy);
+      doc.text(docText(sig.name), L + 2, y + 7.6);
+      setFont(doc, 'DMSans', 6.6, DOC.slate);
+      doc.text(docText(`Signed electronically by ${sig.name} for Beyond Scrumptious on ${docDate(sig.signed_on)}`), L, y + 13);
+    }
+    y += sig ? 19 : 16;
     if (a.status === 'signed') {
       setFont(doc, 'DMSans', 7.4, DOC.slate);
       doc.text(docText(`Signed copy received from ${a.signed_name} (${a.signed_when}).`), L, y);
@@ -656,7 +666,9 @@ async function downloadAgreementDocument(a, settings) {
       ['Customer signature', `Signed electronically by ${a.signed_name}`],
       ['Date', a.signed_when],
       ['Record', `Connection ${a.signed_ip || 'unknown'} · agreement fingerprint ${String(a.content_hash).slice(0, 16)}`],
-      ['For Beyond Scrumptious', `Naavyen Patel · issued ${docDate(c.created_on)}`],
+      ['For Beyond Scrumptious', c.business_signature
+        ? `Signed electronically by ${c.business_signature.name} on ${docDate(c.business_signature.signed_on)}`
+        : `Naavyen Patel · issued ${docDate(c.created_on)}`],
     ]
     : [];
   signRows.forEach(([k, v]) => {

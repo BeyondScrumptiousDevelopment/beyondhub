@@ -32,6 +32,8 @@ export interface AgreementContent {
   balance_due: string;
   service_name: string;
   sections: { number: string; heading: string; blocks: AgreementBlock[] }[];
+  /** Beyond Scrumptious's own electronic signature, applied when the owner generated the agreement. */
+  business_signature?: { name: string; signed_on: string; applied_by: string } | null;
 }
 
 export interface AgreementRow {
@@ -111,6 +113,8 @@ export interface AgreementInputs {
   prep: PrepData;
   /** The deposit invoice's number, used as the payment reference when there is one. */
   paymentReference: string;
+  /** Set when the owner (an admin) generates the agreement: their signature and date are added. */
+  businessSignature?: { name: string; applied_by: string } | null;
 }
 
 /**
@@ -239,6 +243,9 @@ export function buildContent(
     balance_due: quote.final_payment_due,
     service_name: service.name,
     sections: sections.filter((sec) => sec.heading || sec.blocks.length),
+    business_signature: inputs.businessSignature
+      ? { ...inputs.businessSignature, signed_on: new Date().toISOString().slice(0, 10) }
+      : null,
   };
 }
 
