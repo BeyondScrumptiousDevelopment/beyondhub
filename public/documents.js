@@ -129,63 +129,64 @@ function label(doc, text, x, y, align = 'left') {
  *   goodToKnow: [string...], fileName,
  * }
  */
-async function drawBrandedDocument(d, settings) {
-  const assets = await loadPdfAssets();
-  const doc = newBrandedDoc(assets);
+// ---- Pieces shared by every document: header, title band and footer
+
+function drawHeader(doc, assets, settings) {
   const { left: L, right: R } = DOC;
+  const props = doc.getImageProperties(assets.logo);
+  const logoW = 75;
+  doc.addImage(assets.logo, 'PNG', L, 16, logoW, (logoW * props.height) / props.width, 'wordmark', 'FAST');
+  setFont(doc, 'DMSans', 7.6, DOC.slate);
+  String(settings.contact_lines || '').split('\n').map((s) => s.trim()).filter(Boolean).slice(0, 5)
+    .forEach((line, i) => spaced(doc, line, R, 14 + i * 4, { space: 0.1, align: 'right' }));
+  rule(doc, L, 32.8, R);
+}
 
-  const header = () => {
-    const props = doc.getImageProperties(assets.logo);
-    const logoW = 75;
-    doc.addImage(assets.logo, 'PNG', L, 16, logoW, (logoW * props.height) / props.width, 'wordmark', 'FAST');
-    setFont(doc, 'DMSans', 7.6, DOC.slate);
-    String(settings.contact_lines || '').split('\n').map((s) => s.trim()).filter(Boolean).slice(0, 5)
-      .forEach((line, i) => spaced(doc, line, R, 14 + i * 4, { space: 0.1, align: 'right' }));
-    rule(doc, L, 32.8, R);
-  };
-  const footer = (pageNo, pages) => {
-    rule(doc, L, 282, R);
-    setFont(doc, 'DMSans', 6.2, DOC.slate);
-    spaced(doc, String(settings.footer_tagline || '').toUpperCase(), L, 287, { space: 0.55 });
-    spaced(doc, pages > 1 ? `${d.kind}  ${pageNo}/${pages}` : d.kind, R, 287, { space: 0.55, align: 'right' });
-  };
-
-  // ---- Header, band and details
-  header();
+/** The powder-blue band: a small label, a title like "THANK you", and up to three detail rows on the right. */
+function drawBand(doc, kind, title, meta) {
+  const { left: L, right: R } = DOC;
   doc.setFillColor(...DOC.surface);
   doc.rect(0, 33, DOC.pageW, 37.6, 'F');
-  label(doc, d.kind, L, 51);
+  label(doc, kind, L, 51);
   setFont(doc, 'Playfair', 26, DOC.navy);
-  const firstW = spaced(doc, d.title[0], L, 62.5, { space: 0.3 });
-  if (d.title[1]) {
+  const firstW = spaced(doc, title[0], L, 62.5, { space: 0.3 });
+  if (title[1]) {
     setFont(doc, 'Cormorant', 30, DOC.navy, 'italic');
-    doc.text(docText(d.title[1]), L + firstW + 3, 62.5);
+    doc.text(docText(title[1]), L + firstW + 3, 62.5);
   }
-  d.meta.forEach(([k, v], i) => {
+  meta.forEach(([k, v], i) => {
     const y = 44 + i * 8;
     label(doc, k, 132, y);
     setFont(doc, 'DMSans', 8.8, DOC.navy);
     doc.text(docText(v), 156.5, y);
     rule(doc, 132, y + 4, R);
   });
+}
 
-  // ---- Billed to / For
-  const block = (title, rows, x1, x2) => {
-    setFont(doc, 'Playfair', 11, DOC.navy);
-    spaced(doc, title.toUpperCase(), x1, 79, { space: 0.35 });
-    rows.forEach(([k, v], i) => {
-      const y = 88 + i * 8.2;
-      label(doc, k, x1, y);
-      setFont(doc, 'DMSans', 8.8, DOC.navy);
-      doc.text(doc.splitTextToSize(docText(v) || '–', x2 - x1 - 33)[0], x1 + 32, y);
-      rule(doc, x1, y + 4.3, x2);
-    });
-  };
-  block(d.leftTitle, d.left, L, 101.6);
-  block(d.rightTitle, d.right, 108, R);
+function drawFooters(doc, settings, kind, tagline = settings.footer_tagline) {
+  const { left: L, right: R } = DOC;
+  const pages = doc.getNumberOfPages();
+  for (let i = 1; i <= pages; i++) {
+    doc.setPage(i);
+    rule(doc, L, 282, R);
+    setFont(doc, 'DMSans', 6.2, DOC.slate);
+    spaced(doc, String(tagline || '').toUpperCase(), L, 287, { space: 0.55 });
+    spaced(doc, pages > 1 ? `${kind}  ${i}/${pages}` : kind, R, 287, { space: 0.55, align: 'right' });
+  }
+}
 
-  // ---- Line items
-  const rowsY = 88 + Math.max(d.left.length, d.right.length) * 8.2 + 6;
+async function drawBrandedDocument(d, settings) {
+  const assets = await loadPdfAssets();
+  const doc = newBrandedDoc(assets);
+  const { left: L, right: R } = DOC;
+  const header = () => drawHeader(doc, assets, settings);
+
+  // ---- Header, band and details
+  header();
+  drawBand(doc, d.kind, d.title, d.meta);
+
+  // ---- Billed to / For, then the line items
+  const rowsY = drawDetailBlocks(doc, d.leftTitle, d.left, d.rightTitle, d.right);
   window.autoTable(doc, {
     startY: rowsY,
     margin: { left: L, right: DOC.pageW - R, top: 40, bottom: 22 },
@@ -283,9 +284,7 @@ async function drawBrandedDocument(d, settings) {
     gy += 1.2;
   });
 
-  // ---- Footer on every page
-  const pages = doc.getNumberOfPages();
-  for (let i = 1; i <= pages; i++) { doc.setPage(i); footer(i, pages); }
+  drawFooters(doc, settings, d.kind);
 
   doc.setProperties({ title: d.fileName, author: settings.business_name, creator: settings.business_name });
   doc.save(`${safeFileName(d.fileName)}.pdf`);
@@ -419,4 +418,216 @@ async function downloadInvoiceDocument(inv, settings) {
     goodToKnow,
     fileName: `${settings.business_name} Invoice ${inv.number}${s.client_name ? ' - ' + s.client_name : ''}`,
   }, settings);
+}
+
+// ---------- Flowing text (agreements and prep sheets) ----------
+
+/** Writes headings, paragraphs and label rows down the page, starting new pages as needed. */
+function textFlow(doc, assets, settings, startY) {
+  const { left: L, right: R } = DOC;
+  const flow = {
+    y: startY,
+    ensure(height) {
+      if (flow.y + height > 276) { doc.addPage(); drawHeader(doc, assets, settings); flow.y = 42; }
+    },
+    heading(text) {
+      flow.ensure(16);
+      flow.y += 4;
+      setFont(doc, 'Playfair', 11, DOC.navy);
+      spaced(doc, String(text).toUpperCase(), L, flow.y, { space: 0.35 });
+      flow.y += 6.5;
+    },
+    para(text, { color = DOC.slate, size = 9, x = L, width = R - L, gap = 2.4 } = {}) {
+      setFont(doc, 'DMSans', size, color);
+      const lines = doc.splitTextToSize(docText(text), width);
+      lines.forEach((line) => { flow.ensure(5); doc.text(line, x, flow.y); flow.y += size * 0.47; });
+      flow.y += gap;
+    },
+    rows(rows, { labelWidth = 38 } = {}) {
+      rows.filter(([, v]) => String(v ?? '').trim()).forEach(([k, v]) => {
+        setFont(doc, 'DMSans', 8.8, DOC.navy);
+        const lines = doc.splitTextToSize(docText(v), R - L - labelWidth);
+        flow.ensure(lines.length * 4.4 + 4);
+        label(doc, k, L, flow.y);
+        setFont(doc, 'DMSans', 8.8, DOC.navy);
+        lines.forEach((line, i) => doc.text(line, L + labelWidth, flow.y + i * 4.4));
+        flow.y += lines.length * 4.4 + 0.6;
+        rule(doc, L, flow.y, R);
+        flow.y += 4.6;
+      });
+    },
+  };
+  return flow;
+}
+
+/**
+ * A value in a fixed-height detail row: shrinks the text to fit, and wraps onto a second line
+ * rather than cutting anything off (a phone number must never be lost).
+ */
+function fitValue(doc, value, x, y, width) {
+  const text = docText(value) || '–';
+  for (const size of [8.8, 8, 7.4]) {
+    setFont(doc, 'DMSans', size, DOC.navy);
+    if (doc.getTextWidth(text) <= width) { doc.text(text, x, y); return; }
+  }
+  setFont(doc, 'DMSans', 7, DOC.navy);
+  const lines = doc.splitTextToSize(text, width).slice(0, 2);
+  lines.forEach((line, i) => doc.text(line, x, y - 1.6 + i * 3.2));
+}
+
+/** The "Billed to / For" style pair of blocks under the band. Returns the y below them. */
+function drawDetailBlocks(doc, leftTitle, left, rightTitle, right) {
+  const { left: L, right: R } = DOC;
+  const block = (title, rows, x1, x2) => {
+    setFont(doc, 'Playfair', 11, DOC.navy);
+    spaced(doc, title.toUpperCase(), x1, 79, { space: 0.35 });
+    rows.forEach(([k, v], i) => {
+      const y = 88 + i * 8.2;
+      label(doc, k, x1, y);
+      fitValue(doc, v, x1 + 32, y, x2 - x1 - 33);
+      rule(doc, x1, y + 4.3, x2);
+    });
+  };
+  block(leftTitle, left, L, 101.6);
+  block(rightTitle, right, 108, R);
+  return 88 + Math.max(left.length, right.length) * 8.2 + 6;
+}
+
+// ---------- Booking agreement ----------
+
+async function downloadAgreementDocument(a, settings) {
+  const c = a.content;
+  const assets = await loadPdfAssets();
+  const doc = newBrandedDoc(assets);
+  const { left: L, right: R } = DOC;
+  drawHeader(doc, assets, settings);
+  drawBand(doc, 'BOOKING AGREEMENT', ['YOUR', 'booking'], [
+    ['Agreement no.', c.number], ['Date', docDate(c.created_on)], ['Quote ref.', c.quote_reference],
+  ]);
+  let y = drawDetailBlocks(doc, 'Client', clientRows(c), 'Event', eventRows(c));
+
+  window.autoTable(doc, {
+    startY: y,
+    margin: { left: L, right: DOC.pageW - R, top: 40, bottom: 22 },
+    head: [['WHAT\'S INCLUDED', 'QTY', 'AMOUNT']],
+    body: c.items.map((i) => [docText(i.description), docText(`${i.quantity}${i.unit && !['each', 'booking', 'cake'].includes(i.unit) ? ' ' + i.unit : ''}`), docMoney(i.amount_pence)]),
+    theme: 'plain',
+    styles: { font: 'DMSans', fontSize: 8.6, textColor: DOC.navy, cellPadding: { top: 2.6, bottom: 2.6, left: 2, right: 2 } },
+    headStyles: { fontSize: 6.2, cellPadding: { top: 1, bottom: 3, left: 2, right: 2 } },
+    columnStyles: { 1: { cellWidth: 24, halign: 'right' }, 2: { cellWidth: 28, halign: 'right' } },
+    didParseCell: (cell) => { if (cell.section === 'head' && cell.column.index > 0) cell.cell.styles.halign = 'right'; },
+    willDrawCell: (cell) => { if (cell.section === 'head') doc.setCharSpace(0.55); },
+    didDrawCell: (cell) => {
+      doc.setCharSpace(0);
+      if (cell.column.index === 2) rule(doc, L, cell.cell.y + cell.cell.height, R, cell.section === 'head' ? DOC.navy : DOC.tint, cell.section === 'head' ? 0.35 : 0.25);
+    },
+    didDrawPage: () => { if (doc.getCurrentPageInfo().pageNumber > 1) drawHeader(doc, assets, settings); },
+  });
+  const flow = textFlow(doc, assets, settings, doc.lastAutoTable.finalY + 7);
+  const sums = [['Total', docMoney(c.total_pence)]];
+  if (c.deposit_pence) {
+    sums.push(['Deposit to secure your date', docMoney(c.deposit_pence)]);
+    sums.push([`Balance${c.balance_due ? ` due by ${docDate(c.balance_due)}` : ''}`, docMoney(c.balance_pence)]);
+  }
+  sums.forEach(([k, v], i) => {
+    flow.ensure(7);
+    setFont(doc, i === 0 ? 'Playfair' : 'DMSans', i === 0 ? 11 : 8.8, DOC.navy);
+    doc.text(docText(k), 115.6, flow.y);
+    doc.text(v, R - 2, flow.y, { align: 'right' });
+    flow.y += 6.4;
+  });
+  flow.y += 2;
+
+  c.sections.forEach((s) => {
+    if (s.heading) flow.heading(s.heading);
+    s.paragraphs.forEach((p) => flow.para(p));
+  });
+
+  // Signature record
+  flow.heading('Signature');
+  if (a.status === 'signed') {
+    flow.ensure(26);
+    doc.setFillColor(...DOC.mist);
+    doc.setDrawColor(...DOC.tint);
+    doc.rect(L, flow.y - 4, R - L, 21, 'FD');
+    flow.y += 2;
+    flow.para(`Signed electronically by ${a.signed_name}`, { color: DOC.navy, size: 10, x: L + 4, width: R - L - 8, gap: 1 });
+    flow.para(`on ${a.signed_when}, agreeing to this booking agreement on behalf of ${c.client_name}.`, { x: L + 4, width: R - L - 8, gap: 1 });
+    flow.para(`Record: connection ${a.signed_ip || 'unknown'} · agreement fingerprint ${String(a.content_hash).slice(0, 16)}`, { size: 7.4, x: L + 4, width: R - L - 8, gap: 0 });
+    flow.y += 4;
+  } else {
+    flow.para(a.status === 'void'
+      ? 'This agreement was withdrawn and is not valid.'
+      : 'Awaiting the client\'s signature. The client signs online using the private link we send them.', { color: DOC.navy });
+  }
+
+  drawFooters(doc, settings, 'BOOKING AGREEMENT');
+  doc.setProperties({ title: `${settings.business_name} booking agreement ${c.number}`, author: settings.business_name });
+  doc.save(`${safeFileName(`${settings.business_name} Booking Agreement ${c.number}${c.client_name ? ' - ' + c.client_name : ''}${a.status === 'signed' ? ' (signed)' : ''}`)}.pdf`);
+}
+
+// ---------- Event prep sheet (internal) ----------
+
+async function downloadPrepDocument(q, prep, facts, settings) {
+  const assets = await loadPdfAssets();
+  const doc = newBrandedDoc(assets);
+  const { left: L, right: R } = DOC;
+  drawHeader(doc, assets, settings);
+  drawBand(doc, 'EVENT PREP', ['EVENT', 'prep'], [
+    ['Event date', docDate(q.event_date) || '–'], ['Quote ref.', q.reference], ['Product', facts.productLabel],
+  ]);
+  const y = drawDetailBlocks(doc, 'Client', [
+    ['Name', q.client_name], ['Phone', q.client_phone], ['On the day', prep.contact_on_day],
+  ], 'Event', [
+    ['Event', q.event_type], ['Time', prep.service_time || q.event_time], ['Venue', q.venue],
+  ]);
+  const flow = textFlow(doc, assets, settings, y);
+
+  // Allergies first, so nobody can miss them.
+  const allergyLines = doc.setFont('DMSans', 'normal').setFontSize(9.4).splitTextToSize(docText(prep.allergies || 'None noted. Confirm with the client in writing before the event.'), R - L - 10);
+  const boxH = allergyLines.length * 4.6 + 4.4;
+  flow.ensure(boxH + 18); // keep the heading and its box on the same page
+  flow.heading('Allergies & dietary');
+  doc.setFillColor(255, 244, 214);
+  doc.setDrawColor(230, 194, 92);
+  doc.setLineWidth(0.35);
+  doc.rect(L, flow.y - 4.5, R - L, boxH, 'FD');
+  setFont(doc, 'DMSans', 9.4, DOC.navy, prep.allergies ? 'bold' : 'normal');
+  allergyLines.forEach((line, i) => doc.text(line, L + 5, flow.y + 0.2 + i * 4.6));
+  flow.y += boxH + 3;
+
+  flow.heading('On the day');
+  flow.rows([
+    ['Arrive / collect', prep.arrival_time], ['Service', prep.service_time], ['Address', prep.venue_address || q.venue],
+    ['Access & parking', prep.access_parking], ['Power & setup', prep.power_setup],
+  ]);
+
+  if (facts.rows.length) {
+    flow.heading('Quantities');
+    flow.rows(facts.rows, { labelWidth: 48 });
+  }
+
+
+  if (prep.selections) { flow.heading('Selections'); flow.para(prep.selections, { color: DOC.navy }); }
+  if (prep.design_notes) { flow.heading('Design & customisation'); flow.para(prep.design_notes, { color: DOC.navy }); }
+
+  if (prep.checklist.length) {
+    flow.heading('Checklist');
+    prep.checklist.forEach((c) => {
+      setFont(doc, 'DMSans', 9, DOC.navy);
+      const lines = doc.splitTextToSize(docText(c.item), R - L - 10);
+      flow.ensure(lines.length * 4.4 + 2.5);
+      doc.setDrawColor(...DOC.navy);
+      doc.setLineWidth(0.3);
+      doc.rect(L, flow.y - 3.3, 3.6, 3.6);
+      if (c.done) { doc.line(L + 0.7, flow.y - 1.4, L + 1.6, flow.y - 0.4); doc.line(L + 1.6, flow.y - 0.4, L + 3, flow.y - 2.8); }
+      lines.forEach((line, i) => doc.text(line, L + 7, flow.y + i * 4.4));
+      flow.y += lines.length * 4.4 + 2.4;
+    });
+  }
+  if (prep.notes) { flow.heading('Notes'); flow.para(prep.notes, { color: DOC.navy }); }
+
+  drawFooters(doc, settings, 'EVENT PREP', 'INTERNAL · NOT FOR CLIENTS');
+  doc.setProperties({ title: `Event prep ${q.reference}`, author: settings.business_name });
+  doc.save(`${safeFileName(`Event prep ${q.event_date || ''} ${q.client_name || q.reference}`)}.pdf`);
 }

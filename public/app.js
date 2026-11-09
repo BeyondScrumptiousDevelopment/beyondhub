@@ -149,6 +149,7 @@ const routes = {
   quote: renderQuote,
   invoices: renderInvoicesList,
   invoice: renderInvoice,
+  prep: renderPrep,
   enquiry: renderEnquiry,
   sop: renderSop,
   prices: renderPrices,
@@ -161,7 +162,7 @@ let currentHash = location.hash;
 async function route() {
   currentHash = location.hash;
   const [, name = 'home', id] = location.hash.split('?')[0].split('/');
-  const section = { quote: 'quotes', invoice: 'invoices', enquiry: 'inbox' }[name] || name;
+  const section = { quote: 'quotes', invoice: 'invoices', enquiry: 'inbox', prep: 'quotes' }[name] || name;
   document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.route === section));
   unsavedChanges = false;
   app.innerHTML = '<p class="muted">Loading…</p>';
@@ -498,6 +499,12 @@ async function renderQuote(id) {
         </div>
       </div>
 
+      <div class="panel">
+        <div class="row"><h2 style="margin:0">Booking agreement</h2><span class="spacer"></span>
+          <a class="button" href="#/prep/${q.id}">Event prep sheet</a></div>
+        <div id="agreement-box" style="margin-top:10px"></div>
+      </div>
+
       <div class="panel" id="invoices-panel">
         <h2 style="margin-top:0">Invoices</h2>
         <div id="invoice-list"></div>
@@ -807,10 +814,90 @@ async function renderQuote(id) {
       }
     });
   }
-  app.querySelector('[data-field="status"]').addEventListener('change', () => renderInvoices().catch(() => {}));
+  // ---- Booking agreement for this quote
+  let lastLink = '';
+  async function renderAgreementBox() {
+    const box = document.getElementById('agreement-box');
+    const agreements = await api(`/api/quotes/${id}/agreements`);
+    const current = [...agreements].reverse().find((a) => a.status !== 'void');
+    const whatsapp = (link) => {
+      const first = String(collect().client_name || '').split(' ')[0];
+      return `Hi${first ? ' ' + first : ''}, here's your booking agreement for your ${collect().event_type || 'event'}${collect().event_date ? ' on ' + formatDate(collect().event_date) : ''}. Please read it and sign here: ${link}\n\nThank you!\n${settings.business_name}`;
+    };
+    if (!current) {
+      box.innerHTML = collect().status !== 'accepted'
+        ? '<p class="muted">Set the quote to accepted to create a booking agreement.</p>'
+        : `<p class="muted">Recommended for bookings of £300 or more and live stations. It's made from this quote as it is now, so save any changes first.</p>
+           <button id="agr-create" class="primary">Create booking agreement</button>`;
+    } else if (current.status === 'signed') {
+      box.innerHTML = `<p>${badge('signed')} <strong>${esc(current.number)}</strong> signed by <strong>${esc(current.signed_name)}</strong> on ${esc(formatDate(current.signed_at))}.</p>
+        <div class="row"><button data-agr-pdf="${current.id}" class="primary">Download signed PDF</button>
+        <button data-agr-void="${current.id}" class="danger admin-only">Void</button></div>`;
+    } else {
+      box.innerHTML = `<p>${badge('sent')} <strong>${esc(current.number)}</strong> is waiting for the client's signature. The link works until ${esc(formatDate(current.expires_at))}.</p>
+        ${lastLink ? `<label>Signing link (only shown now; create a new one if you lose it)<input id="agr-link" readonly value="${esc(lastLink)}"></label>
+          <div class="row" style="margin-top:8px"><button id="agr-copy" class="primary">Copy link</button><button id="agr-copy-msg">Copy WhatsApp message</button></div>`
+          : '<p class="muted">For security the link is only shown when it\'s created. If you need it again, create a new link; the old one stops working.</p>'}
+        <div class="row" style="margin-top:8px"><button id="agr-renew">Create a new link</button>
+          <button data-agr-pdf="${current.id}">Download PDF</button>
+          <button data-agr-void="${current.id}" class="danger admin-only">Void</button></div>`;
+    }
+    const create = document.getElementById('agr-create');
+    if (create) create.addEventListener('click', async () => {
+      create.disabled = true;
+      try {
+        if (unsavedChanges) await save();
+        lastLink = (await api(`/api/quotes/${id}/agreements`, { method: 'POST' })).link;
+        toast('Booking agreement created. Copy the link to send it.');
+        renderAgreementBox();
+      } catch (err) { toast(err.message, true); create.disabled = false; }
+    });
+    const renew = document.getElementById('agr-renew');
+    if (renew) renew.addEventListener('click', async () => {
+      if (!confirm('Create a new signing link? The old link will stop working.')) return;
+      try { lastLink = (await api(`/api/agreements/${current.id}/link`, { method: 'POST' })).link; renderAgreementBox(); } catch (err) { toast(err.message, true); }
+    });
+    const copyText = async (text, what) => {
+      try { await navigator.clipboard.writeText(text); toast(`${what} copied`); } catch { toast('Copy failed: select the text and copy it manually', true); }
+    };
+    const copy = document.getElementById('agr-copy');
+    if (copy) copy.addEventListener('click', () => copyText(lastLink, 'Link'));
+    const copyMsg = document.getElementById('agr-copy-msg');
+    if (copyMsg) copyMsg.addEventListener('click', () => copyText(whatsapp(lastLink), 'Message'));
+    box.querySelectorAll('[data-agr-pdf]').forEach((b) => b.addEventListener('click', () => downloadAgreement(b.dataset.agrPdf, b)));
+    box.querySelectorAll('[data-agr-void]').forEach((b) => b.addEventListener('click', async () => {
+      if (!confirm('Void this booking agreement? Its link stops working and it stays on record as void.')) return;
+      try { await api(`/api/agreements/${b.dataset.agrVoid}/void`, { method: 'POST' }); lastLink = ''; toast('Agreement voided'); renderAgreementBox(); } catch (err) { toast(err.message, true); }
+    }));
+  }
+
+  app.querySelector('[data-field="status"]').addEventListener('change', () => {
+    renderInvoices().catch(() => {});
+    renderAgreementBox().catch(() => {});
+  });
 
   renderLines();
   renderInvoices().catch((err) => { document.getElementById('invoice-list').innerHTML = `<div class="warn">${esc(err.message)}</div>`; });
+  renderAgreementBox().catch((err) => { document.getElementById('agreement-box').innerHTML = `<div class="warn">${esc(err.message)}</div>`; });
+}
+
+/** "12 November 2026 at 14:05", in UK time, from a database timestamp (which is UTC). */
+function ukDateTime(utc) {
+  const d = new Date(`${String(utc).replace(' ', 'T')}Z`);
+  if (Number.isNaN(d.getTime())) return utc;
+  return `${d.toLocaleDateString('en-GB', { timeZone: 'Europe/London', day: 'numeric', month: 'long', year: 'numeric' })} at ${d.toLocaleTimeString('en-GB', { timeZone: 'Europe/London', hour: '2-digit', minute: '2-digit' })}`;
+}
+
+async function downloadAgreement(agreementId, button) {
+  if (button) button.disabled = true;
+  try {
+    const [a, settings] = await Promise.all([api(`/api/agreements/${agreementId}`), api('/api/settings')]);
+    await downloadAgreementDocument({ ...a, signed_when: a.signed_at ? ukDateTime(a.signed_at) : '' }, settings);
+  } catch (err) {
+    toast(`Couldn't make the PDF: ${err.message}`, true);
+  } finally {
+    if (button) button.disabled = false;
+  }
 }
 
 const INVOICE_KIND_LABELS = { deposit: 'Deposit', balance: 'Balance', full: 'Full amount' };
@@ -1025,6 +1112,14 @@ async function renderSettings() {
         <label>Footer line<input id="footer_tagline" value="${esc(s.footer_tagline)}"></label>
         <label>Email for questions<input id="questions_email" type="email" value="${esc(s.questions_email)}"></label>
       </div>
+      <h2>Booking agreement</h2>
+      <p class="muted">The wording clients see and sign. Start a section with <code>## Heading</code>. These fill in automatically:
+        <code>{{client_name}}</code> <code>{{event_type}}</code> <code>{{event_date}}</code> <code>{{venue}}</code> <code>{{guests}}</code>
+        <code>{{quote_reference}}</code> <code>{{total}}</code> <code>{{deposit}}</code> <code>{{balance}}</code> <code>{{balance_due_date}}</code>
+        <code>{{payment_schedule}}</code> <code>{{terms_url}}</code> <code>{{business_name}}</code>.
+        Changes apply to new agreements only. Have the wording checked before relying on it.</p>
+      <label>Terms &amp; Conditions link<input id="terms_url" type="url" value="${esc(s.terms_url)}"></label><br>
+      <label>Agreement wording<textarea id="agreement_template" class="tall" style="min-height:380px">${esc(s.agreement_template)}</textarea></label>
       <h2>Bank details for invoices</h2>
       <div class="grid">
         <label>Account name<input id="bank_account_name" value="${esc(s.bank_account_name)}" autocomplete="off"></label>
@@ -1100,7 +1195,197 @@ async function renderSettings() {
       deposit_percent: Number(v('deposit_percent')), quote_valid_days: Number(v('quote_valid_days')), quote_terms: v('quote_terms'),
       contact_lines: v('contact_lines'), footer_tagline: v('footer_tagline'), questions_email: v('questions_email'),
       bank_account_name: v('bank_account_name'), bank_sort_code: v('bank_sort_code'), bank_account_number: v('bank_account_number'),
+      terms_url: v('terms_url'), agreement_template: v('agreement_template'),
     } });
     toast('Settings saved');
+  });
+}
+
+// ---------- event prep ----------
+
+/**
+ * Quantities and a starting checklist from the quote, using the SOP's planning figures:
+ * pancakes 4 per guest, ~110 per 900ml batter bottle, ~50 per batch; 2 staff (3 from 251 guests);
+ * service 2 hours up to 150 guests, 2.5 hours up to 300.
+ */
+function prepFacts(q) {
+  const lines = q.line_items || [];
+  const text = lines.map((i) => i.description).join(' | ');
+  const pkg = (/\b(Classic|Deluxe|Signature)\b/.exec(text) || [])[1] || '';
+  const picks = { Classic: 2, Deluxe: 4, Signature: 6 }[pkg];
+  const guests = Number(q.guests) || 0;
+  if (/pancake station/i.test(text)) {
+    const pancakes = guests * 4;
+    const bottles = Math.ceil(pancakes / 110);
+    return {
+      product: 'pancake',
+      productLabel: 'Pancake station',
+      rows: [
+        ['Package', pkg ? `${pkg}${picks ? ` · ${picks} toppings + ${picks} sauces` : ''}` : ''],
+        ['Guests', guests ? String(guests) : 'Not set on the quote'],
+        ['Service length', !guests ? '' : guests <= 150 ? '2 hours' : guests <= 300 ? '2.5 hours' : 'Bespoke (over 300 guests)'],
+        ['Staff', !guests ? '' : guests >= 251 ? '3' : '2'],
+        ['Mini pancakes (plan)', guests ? `about ${pancakes} (4 per guest)` : ''],
+        ['Batter bottles (900ml)', guests ? `${bottles} (about 110 pancakes each), plus a spare` : ''],
+        ['Batches', guests ? `about ${Math.ceil(pancakes / 50)} (≈50 per batch, 5–10 min each)` : ''],
+      ],
+      checklist: [
+        'Mini pancake machines ×2 (one in use, one backup)',
+        guests ? `Batter bottles ×${bottles + 1} (900ml, includes a spare)` : 'Batter bottles (900ml)',
+        `Toppings${picks ? ` ×${picks}` : ''} (see selections)`,
+        `Sauces${picks ? ` ×${picks}` : ''} (see selections)`,
+        'Serving ware and napkins',
+        'Extension lead',
+        'Table cover',
+        'Signage / customisation (if booked)',
+      ],
+    };
+  }
+  if (/croffle/i.test(text)) {
+    const croffles = lines.filter((i) => /croffle/i.test(i.description)).reduce((n, i) => n + Number(i.quantity || 0), 0);
+    return {
+      product: 'croffle',
+      productLabel: 'Croffle station',
+      rows: [
+        ['Package', pkg ? `${pkg}${picks ? ` · ${picks} toppings + ${picks} sauces` : ''}` : ''],
+        ['Croffles', croffles ? String(croffles) : ''],
+        ['Venue needs', '6ft table, power within about 5 metres, shelter if outdoors'],
+        ['Setup time', '30–45 minutes before service'],
+      ],
+      checklist: [
+        'Croffle machine(s)',
+        croffles ? `Croffle dough for ${croffles} croffles (plus a few spare)` : 'Croffle dough',
+        `Toppings${picks ? ` ×${picks}` : ''} (see selections)`,
+        `Sauces${picks ? ` ×${picks}` : ''} (see selections)`,
+        'Serving ware and napkins',
+        'Extension lead',
+        'Table cover',
+        'Shelter / gazebo if outdoors (check with the venue)',
+      ],
+    };
+  }
+  if (/\bcake\b/i.test(text)) {
+    return {
+      product: 'cake',
+      productLabel: 'Cake',
+      rows: lines.map((i) => [i.quantity !== 1 ? `${i.quantity} ×` : 'Item', i.description]),
+      checklist: [
+        'Cake board and box',
+        'Toppers and decorations',
+        'Label: flavour and allergens',
+        'Collection details and pickup time confirmed',
+      ],
+    };
+  }
+  return {
+    product: 'other',
+    productLabel: 'Event',
+    rows: lines.map((i) => [i.quantity !== 1 ? `${i.quantity} ×` : 'Item', i.description]),
+    checklist: ['Serving ware and napkins', 'Extension lead', 'Table cover'],
+  };
+}
+
+async function renderPrep(quoteId) {
+  const [q, prepRes, settings] = await Promise.all([api(`/api/quotes/${quoteId}`), api(`/api/quotes/${quoteId}/prep`), api('/api/settings')]);
+  const facts = prepFacts(q);
+  const prep = prepRes.data;
+  if (!prep.checklist.length) prep.checklist = facts.checklist.map((item) => ({ item, done: false }));
+  const fields = [
+    ['arrival_time', 'Arrive / collect'], ['service_time', 'Service time'], ['contact_on_day', 'Contact on the day'],
+    ['venue_address', 'Venue address'], ['access_parking', 'Access & parking'], ['power_setup', 'Power & setup'],
+  ];
+  app.innerHTML = `
+    <div class="row"><h1>Event prep · ${esc(q.client_name || q.reference)}</h1><span class="spacer"></span>
+      <a class="button" href="#/quote/${q.id}">Back to quote</a>
+      <button id="prep-fill">Fill from chat</button>
+      <button id="prep-save">Save</button>
+      <button id="prep-pdf" class="primary">Download PDF</button></div>
+    <p class="muted">${esc(q.event_type)} · ${esc(formatDate(q.event_date))} · ${esc(q.venue)}${prepRes.updated_at ? ` · last saved ${esc(formatDate(prepRes.updated_at))} by ${esc(prepRes.updated_by)}` : ''}</p>
+    <div class="panel">
+      <h2 style="margin-top:0">Quantities</h2>
+      ${facts.rows.filter(([, v]) => v).length
+        ? `<table><tbody>${facts.rows.filter(([, v]) => v).map(([k, v]) => `<tr><td class="muted" style="width:40%">${esc(k)}</td><td>${esc(v)}</td></tr>`).join('')}</tbody></table>`
+        : '<p class="muted">No quantities to work out for this quote.</p>'}
+      <p class="muted">Worked out from the quote using the SOP's planning figures. Update the guests or items on the quote to change them.</p>
+    </div>
+    <div class="panel">
+      <h2 style="margin-top:0">On the day</h2>
+      <div class="grid">${fields.map(([k, l]) => `<label>${l}<textarea data-prep="${k}" rows="2" style="min-height:0">${esc(prep[k])}</textarea></label>`).join('')}</div>
+      <h2>Allergies & dietary</h2>
+      <textarea data-prep="allergies" placeholder="None noted yet. Confirm in writing before the event.">${esc(prep.allergies)}</textarea>
+      <h2>Selections</h2>
+      <textarea data-prep="selections" placeholder="Package, toppings, sauces, flavours…">${esc(prep.selections)}</textarea>
+      <h2>Design & customisation</h2>
+      <textarea data-prep="design_notes">${esc(prep.design_notes)}</textarea>
+      <h2>Notes for the team</h2>
+      <textarea data-prep="notes">${esc(prep.notes)}</textarea>
+    </div>
+    <div class="panel">
+      <h2 style="margin-top:0">Checklist</h2>
+      <div id="checklist"></div>
+      <div class="row" style="margin-top:8px"><input id="check-new" placeholder="Add an item" style="flex:1;min-width:180px"><button id="check-add">Add</button></div>
+    </div>`;
+
+  const list = document.getElementById('checklist');
+  const drawChecklist = () => {
+    list.innerHTML = prep.checklist.map((c, i) => `
+      <div class="row" style="margin:4px 0" data-i="${i}">
+        <input type="checkbox" style="width:auto" ${c.done ? 'checked' : ''} data-k="done">
+        <input data-k="item" value="${esc(c.item)}" style="flex:1;min-width:180px">
+        <button data-k="remove" class="danger" title="Remove">✕</button>
+      </div>`).join('') || '<p class="muted">No items.</p>';
+  };
+  drawChecklist();
+  list.addEventListener('input', (e) => {
+    const row = e.target.closest('[data-i]');
+    if (!row) return;
+    const c = prep.checklist[Number(row.dataset.i)];
+    if (e.target.dataset.k === 'item') c.item = e.target.value;
+    if (e.target.dataset.k === 'done') c.done = e.target.checked;
+    unsavedChanges = true;
+  });
+  list.addEventListener('click', (e) => {
+    if (e.target.dataset.k !== 'remove') return;
+    prep.checklist.splice(Number(e.target.closest('[data-i]').dataset.i), 1);
+    unsavedChanges = true;
+    drawChecklist();
+  });
+  document.getElementById('check-add').addEventListener('click', () => {
+    const input = document.getElementById('check-new');
+    if (!input.value.trim()) return;
+    prep.checklist.push({ item: input.value.trim(), done: false });
+    input.value = '';
+    unsavedChanges = true;
+    drawChecklist();
+  });
+  app.querySelectorAll('[data-prep]').forEach((el) => el.addEventListener('input', () => { prep[el.dataset.prep] = el.value; unsavedChanges = true; }));
+
+  const save = async () => {
+    await api(`/api/quotes/${quoteId}/prep`, { method: 'PUT', json: { data: prep } });
+    unsavedChanges = false;
+  };
+  document.getElementById('prep-save').addEventListener('click', async () => {
+    try { await save(); toast('Prep sheet saved'); } catch (err) { toast(err.message, true); }
+  });
+  document.getElementById('prep-fill').addEventListener('click', async (e) => {
+    e.target.disabled = true;
+    e.target.textContent = 'Reading the chat…';
+    try {
+      if (unsavedChanges) await save();
+      const res = await api(`/api/quotes/${quoteId}/prep/fill`, { method: 'POST' });
+      toast(res.filled.length ? `Filled ${res.filled.length} field${res.filled.length === 1 ? '' : 's'} from the chat. Check them before the day.` : 'Nothing new found in the chat. Filled fields are never overwritten.');
+      route();
+    } catch (err) {
+      toast(err.message, true);
+      e.target.disabled = false;
+      e.target.textContent = 'Fill from chat';
+    }
+  });
+  document.getElementById('prep-pdf').addEventListener('click', async (e) => {
+    e.target.disabled = true;
+    try {
+      if (unsavedChanges) await save();
+      await downloadPrepDocument(q, prep, facts, settings);
+    } catch (err) { toast(`Couldn't make the PDF: ${err.message}`, true); } finally { e.target.disabled = false; }
   });
 }

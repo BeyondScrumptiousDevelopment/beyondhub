@@ -11,6 +11,9 @@ import {
 } from './db';
 import { sanitiseLineItems } from './pricing';
 import * as freeagent from './freeagent';
+import { agreementToJson, createAgreement, findByToken, renewLink, type AgreementContent, type AgreementRow } from './agreements';
+import { messagePage, signPage, signedPage } from './signpage';
+import { emptyPrep, extractPrep, sanitisePrep, type PrepData } from './prep';
 import {
   INVOICE_KINDS, createInvoice, formatReference, invoiceToJson, nextInvoiceSequence, paidDeposit, setNumbering,
   type InvoiceKind, type InvoiceRow, type NumberSequence,
@@ -22,6 +25,16 @@ import {
 const app = new Hono<AppContext>();
 app.use('*', securityHeaders);
 
+// The app moved from quotes.beyondscrumptious.com to hub.beyondscrumptious.com.
+app.use('*', async (c, next) => {
+  const url = new URL(c.req.url);
+  if (url.hostname === 'quotes.beyondscrumptious.com') {
+    url.hostname = 'hub.beyondscrumptious.com';
+    return c.redirect(url.toString(), 301);
+  }
+  await next();
+});
+
 // The logo shown on the Cloudflare login page has to load before anyone signs in, so these
 // files, and only these, are served without the sign-in check.
 const PUBLIC_FILES = new Set(['/brand/wordmark-navy.png']);
@@ -29,6 +42,61 @@ app.get('/brand/*', async (c) => {
   const path = new URL(c.req.url).pathname;
   if (!PUBLIC_FILES.has(path)) return c.text('Not found', 404);
   return c.env.ASSETS.fetch(new URL(path, c.req.url));
+});
+
+// ---- Public: booking agreement signing (the only pages clients can open) ----------------
+// Each page shows only the one agreement its private link belongs to. Rate-limited per visitor.
+app.use('/p/*', async (c, next) => {
+  const limiter = c.env.API_LIMITER;
+  if (limiter) {
+    const { success } = await limiter.limit({ key: `public:${c.req.header('cf-connecting-ip') ?? 'unknown'}` });
+    if (!success) return c.html(messagePage('Please wait a moment', 'Too many requests. Wait a minute and try again.'), 429);
+  }
+  await next();
+  c.res.headers.set('Cache-Control', 'no-store');
+  c.res.headers.set('X-Robots-Tag', 'noindex, nofollow');
+});
+
+function agreementStatePage(row: AgreementRow | null, token: string, error = '') {
+  if (!row) return { status: 404 as const, html: messagePage('Link not recognised', "This link isn't valid. Please check you copied the whole link, or ask us for a new one.") };
+  const content = JSON.parse(row.content) as AgreementContent;
+  if (row.status === 'void') return { status: 410 as const, html: messagePage('Agreement withdrawn', 'This agreement has been withdrawn. Please get in touch with us.') };
+  if (row.status === 'signed') return { status: 200 as const, html: signedPage(row, content) };
+  if (row.expires_at < new Date().toISOString().replace('T', ' ').slice(0, 19)) {
+    return { status: 410 as const, html: messagePage('Link expired', 'This link has expired. Please ask us for a new one.') };
+  }
+  return { status: 200 as const, html: signPage(row, content, token, error) };
+}
+
+app.get('/p/sign/:token', async (c) => {
+  const token = c.req.param('token');
+  const page = agreementStatePage(await findByToken(c.env.DB, token), token);
+  return c.html(page.html, page.status);
+});
+
+app.post('/p/sign/:token', async (c) => {
+  const token = c.req.param('token');
+  const row = await findByToken(c.env.DB, token);
+  if (!row || row.status !== 'sent') {
+    const page = agreementStatePage(row, token);
+    return c.html(page.html, page.status);
+  }
+  if (Number(c.req.header('content-length') ?? 0) > 10_000) return c.html(messagePage('Something went wrong', 'That request was too large.'), 413);
+  const form = await c.req.formData();
+  const name = str(form.get('full_name'), 100).replace(/\s+/g, ' ').trim();
+  if (name.length < 2 || form.get('agree') !== 'yes') {
+    const page = agreementStatePage(row, token, 'Please type your full name and tick the box to agree.');
+    return c.html(page.html, 400);
+  }
+  await c.env.DB.prepare(
+    `UPDATE agreements SET status = 'signed', signed_name = ?, signed_at = datetime('now'), signed_ip = ?,
+       signed_user_agent = ?, updated_at = datetime('now')
+     WHERE id = ? AND status = 'sent' AND expires_at > datetime('now')`,
+  )
+    .bind(name, str(c.req.header('cf-connecting-ip'), 64), str(c.req.header('user-agent'), 300), row.id)
+    .run();
+  const page = agreementStatePage(await c.env.DB.prepare('SELECT * FROM agreements WHERE id = ?').bind(row.id).first<AgreementRow>(), token);
+  return c.html(page.html, page.status);
 });
 
 app.use('*', requireStaff);
@@ -198,7 +266,8 @@ app.put('/api/settings', requireAdmin, async (c) => {
   await c.env.DB.prepare(
     `UPDATE settings SET business_name = ?, vat_rate_percent = ?, deposit_percent = ?, quote_valid_days = ?,
       quote_terms = ?, contact_lines = ?, footer_tagline = ?, questions_email = ?, bank_account_name = ?,
-      bank_sort_code = ?, bank_account_number = ?, updated_at = datetime('now') WHERE id = 1`,
+      bank_sort_code = ?, bank_account_number = ?, terms_url = ?, agreement_template = ?, updated_at = datetime('now')
+      WHERE id = 1`,
   )
     .bind(
       str(b.business_name, 200) || 'Beyond Scrumptious',
@@ -212,6 +281,8 @@ app.put('/api/settings', requireAdmin, async (c) => {
       str(b.bank_account_name, 100),
       str(b.bank_sort_code, 20),
       str(b.bank_account_number, 20),
+      /^https:\/\/[^\s]+$/.test(str(b.terms_url, 300)) ? str(b.terms_url, 300) : 'https://www.beyondscrumptious.com/terms-and-conditions',
+      str(b.agreement_template, 30_000),
     )
     .run();
   return c.json({ ok: true });
@@ -392,7 +463,12 @@ app.delete('/api/quotes/:id', requireAdmin, async (c) => {
   const id = idParam(c.req.param('id'));
   const invoiced = await c.env.DB.prepare('SELECT COUNT(*) AS n FROM invoices WHERE quote_id = ?').bind(id).first<{ n: number }>();
   if (invoiced?.n) throw new UserError('This quote has invoices, so it can’t be deleted. Void the invoices instead.', 409);
-  await c.env.DB.prepare('DELETE FROM quotes WHERE id = ?').bind(id).run();
+  const agreed = await c.env.DB.prepare('SELECT COUNT(*) AS n FROM agreements WHERE quote_id = ?').bind(id).first<{ n: number }>();
+  if (agreed?.n) throw new UserError('This quote has a booking agreement, so it can’t be deleted. Void the agreement instead.', 409);
+  await c.env.DB.batch([
+    c.env.DB.prepare('DELETE FROM prep_sheets WHERE quote_id = ?').bind(id),
+    c.env.DB.prepare('DELETE FROM quotes WHERE id = ?').bind(id),
+  ]);
   return c.json({ ok: true });
 });
 
@@ -537,6 +613,99 @@ app.post('/api/invoices/:id/freeagent', async (c) => {
     if (!created) await c.env.DB.prepare('UPDATE invoices SET freeagent_status = NULL WHERE id = ?').bind(id).run();
     throw err;
   }
+});
+
+// --- Booking agreements (staff) -----------------------------------------------------
+
+const signingLink = (c: { req: { url: string } }, token: string) => `${new URL(c.req.url).origin}/p/sign/${token}`;
+
+app.get('/api/quotes/:id/agreements', async (c) => {
+  const { results } = await c.env.DB.prepare(
+    `SELECT id, number, status, expires_at, signed_name, signed_at, created_by, created_at FROM agreements
+     WHERE quote_id = ? ORDER BY id`,
+  )
+    .bind(idParam(c.req.param('id')))
+    .all();
+  return c.json(results);
+});
+
+app.post('/api/quotes/:id/agreements', async (c) => {
+  const quote = await c.env.DB.prepare('SELECT * FROM quotes WHERE id = ?').bind(idParam(c.req.param('id'))).first<QuoteRow>();
+  if (!quote) throw new UserError('Not found', 404);
+  const { id, token } = await createAgreement(c.env.DB, quote, await getSettings(c.env.DB), c.get('userEmail'));
+  return c.json({ id, link: signingLink(c, token) }, 201);
+});
+
+app.get('/api/agreements/:id', async (c) => {
+  const row = await c.env.DB.prepare('SELECT * FROM agreements WHERE id = ?').bind(idParam(c.req.param('id'))).first<AgreementRow>();
+  return row ? c.json(agreementToJson(row)) : c.json({ error: 'Not found' }, 404);
+});
+
+/** A fresh signing link; the previous one stops working. */
+app.post('/api/agreements/:id/link', async (c) => {
+  const token = await renewLink(c.env.DB, idParam(c.req.param('id')));
+  return c.json({ link: signingLink(c, token) });
+});
+
+app.post('/api/agreements/:id/void', requireAdmin, async (c) => {
+  await c.env.DB.prepare("UPDATE agreements SET status = 'void', updated_at = datetime('now') WHERE id = ?")
+    .bind(idParam(c.req.param('id')))
+    .run();
+  return c.json({ ok: true });
+});
+
+// --- Event prep sheets -------------------------------------------------------------
+
+async function loadPrep(db: D1Database, quoteId: number): Promise<{ data: PrepData; updated_by: string | null; updated_at: string | null }> {
+  const row = await db.prepare('SELECT data, updated_by, updated_at FROM prep_sheets WHERE quote_id = ?').bind(quoteId)
+    .first<{ data: string; updated_by: string | null; updated_at: string }>();
+  return row ? { data: sanitisePrep(JSON.parse(row.data)), updated_by: row.updated_by, updated_at: row.updated_at }
+    : { data: emptyPrep(), updated_by: null, updated_at: null };
+}
+
+async function savePrep(db: D1Database, quoteId: number, data: PrepData, by: string) {
+  await db.prepare(
+    `INSERT INTO prep_sheets (quote_id, data, updated_by, updated_at) VALUES (?, ?, ?, datetime('now'))
+     ON CONFLICT (quote_id) DO UPDATE SET data = excluded.data, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
+  )
+    .bind(quoteId, JSON.stringify(data), by)
+    .run();
+}
+
+app.get('/api/quotes/:id/prep', async (c) => {
+  const id = idParam(c.req.param('id'));
+  const quote = await c.env.DB.prepare('SELECT enquiry_id FROM quotes WHERE id = ?').bind(id).first<{ enquiry_id: number | null }>();
+  if (!quote) throw new UserError('Not found', 404);
+  return c.json({ ...(await loadPrep(c.env.DB, id)), has_chat: quote.enquiry_id !== null });
+});
+
+app.put('/api/quotes/:id/prep', async (c) => {
+  const id = idParam(c.req.param('id'));
+  const exists = await c.env.DB.prepare('SELECT 1 AS ok FROM quotes WHERE id = ?').bind(id).first();
+  if (!exists) throw new UserError('Not found', 404);
+  await savePrep(c.env.DB, id, sanitisePrep((await c.req.json<{ data?: unknown }>()).data), c.get('userEmail'));
+  return c.json({ ok: true });
+});
+
+/** Fills empty prep fields from the original chat and the quote. Never overwrites what staff typed. */
+app.post('/api/quotes/:id/prep/fill', draftLimit, async (c) => {
+  const id = idParam(c.req.param('id'));
+  const quote = await c.env.DB.prepare('SELECT * FROM quotes WHERE id = ?').bind(id).first<QuoteRow>();
+  if (!quote) throw new UserError('Not found', 404);
+  const enquiry = quote.enquiry_id
+    ? await c.env.DB.prepare('SELECT raw_text FROM enquiries WHERE id = ?').bind(quote.enquiry_id).first<{ raw_text: string }>()
+    : null;
+  const found = await extractPrep(c.env, quote, enquiry?.raw_text ?? '');
+  const { data } = await loadPrep(c.env.DB, id);
+  const filled: string[] = [];
+  for (const key of Object.keys(found) as (keyof PrepData)[]) {
+    if (key === 'checklist' || key === 'filled_from_chat_at') continue;
+    const value = String(found[key] ?? '').trim();
+    if (value && !String(data[key] ?? '').trim()) { (data[key] as string) = value; filled.push(key); }
+  }
+  data.filled_from_chat_at = new Date().toISOString();
+  await savePrep(c.env.DB, id, data, c.get('userEmail'));
+  return c.json({ data, filled });
 });
 
 // --- FreeAgent ------------------------------------------------------------------

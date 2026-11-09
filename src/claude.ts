@@ -117,13 +117,14 @@ function optionalNumber(value: unknown, min: number, max: number, integer = fals
   return integer ? Math.round(clamped) : clamped;
 }
 
-export async function draftQuote(
+/**
+ * One structured-output call to Claude, returning the JSON text. Errors come back as messages staff
+ * can act on (bad key, credit, rate limits) rather than internal details.
+ */
+export async function callClaudeForJson(
   env: Env,
-  businessName: string,
-  sop: string,
-  priceList: PriceItem[],
-  enquiry: string,
-): Promise<QuoteDraft> {
+  opts: { schema: Record<string, unknown>; system: Anthropic.Beta.Messages.BetaTextBlockParam[]; user: string; what: string },
+): Promise<string> {
   // The address is fixed so a stray environment variable can't send the API key elsewhere;
   // a test server is only allowed during local development.
   const baseURL = env.DEV_USER_EMAIL && env.ANTHROPIC_BASE_URL ? env.ANTHROPIC_BASE_URL : 'https://api.anthropic.com';
@@ -137,22 +138,9 @@ export async function draftQuote(
         betas: ['server-side-fallback-2026-07-01'],
         fallbacks: 'default',
         thinking: { type: 'adaptive' },
-        output_config: { effort: 'medium', format: { type: 'json_schema', schema: DRAFT_SCHEMA } },
-        system: [
-          // The SOP and price list change rarely, so cache them across drafts.
-          { type: 'text', text: systemPrompt(businessName) },
-          {
-            type: 'text',
-            text: `<sop>\n${sop}\n</sop>\n\n<price_list>\n${formatPriceList(priceList)}\n</price_list>`,
-            cache_control: { type: 'ephemeral' },
-          },
-        ],
-        messages: [
-          {
-            role: 'user',
-            content: `Today's date is ${new Date().toISOString().slice(0, 10)}. Draft a quote for this enquiry.\n\n<enquiry>\n${enquiry}\n</enquiry>`,
-          },
-        ],
+        output_config: { effort: 'medium', format: { type: 'json_schema', schema: opts.schema } },
+        system: opts.system,
+        messages: [{ role: 'user', content: opts.user }],
       })
       .finalMessage();
   } catch (err) {
@@ -172,12 +160,35 @@ export async function draftQuote(
   }
 
   if (response.stop_reason === 'refusal') {
-    throw new UserError('Claude declined to draft this quote. Draft it by hand instead.');
+    throw new UserError(`Claude declined to ${opts.what}. Fill it in by hand instead.`);
   }
   if (response.stop_reason === 'max_tokens') {
-    throw new UserError('The enquiry was too long to draft in one go. Try pasting only the relevant part.');
+    throw new UserError('The enquiry was too long to read in one go. Try pasting only the relevant part.');
   }
-  const text = response.content.flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('');
+  return response.content.flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('');
+}
+
+export async function draftQuote(
+  env: Env,
+  businessName: string,
+  sop: string,
+  priceList: PriceItem[],
+  enquiry: string,
+): Promise<QuoteDraft> {
+  const text = await callClaudeForJson(env, {
+    schema: DRAFT_SCHEMA,
+    system: [
+      // The SOP and price list change rarely, so cache them across drafts.
+      { type: 'text', text: systemPrompt(businessName) },
+      {
+        type: 'text',
+        text: `<sop>\n${sop}\n</sop>\n\n<price_list>\n${formatPriceList(priceList)}\n</price_list>`,
+        cache_control: { type: 'ephemeral' },
+      },
+    ],
+    user: `Today's date is ${new Date().toISOString().slice(0, 10)}. Draft a quote for this enquiry.\n\n<enquiry>\n${enquiry}\n</enquiry>`,
+    what: 'draft this quote',
+  });
   const parsed = JSON.parse(text) as Record<string, unknown>;
   const s = (key: string) => String(parsed[key] ?? '');
   const guests = Number(parsed.guests);

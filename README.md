@@ -1,6 +1,6 @@
-# Beyond Scrumptious Quotes
+# Beyond Scrumptious Hub
 
-A private web app for drafting quotes from WhatsApp enquiries, following your own quoting SOP.
+A private web app at `hub.beyondscrumptious.com` for quotes, invoices, booking agreements and event prep, built around your own quoting SOP. (It used to be at `quotes.beyondscrumptious.com`, which now redirects here.)
 
 - **Email in a WhatsApp chat export** (or paste it into the app). Claude reads the conversation and drafts a quote.
 - **Your SOP and price list live in the app**, and anyone on the team can edit them. Claude only uses prices from the price list. Anything else is highlighted for a person to price.
@@ -68,7 +68,7 @@ In the Cloudflare dashboard, go to **Zero Trust**. The free plan covers up to 50
 
 1. **Settings → Authentication → Login methods:** "One-time PIN" works with no extra setup (you get a code by email). To sign in with Google instead, add Google Workspace.
 2. **Access → Applications → Add an application → Self-hosted.**
-   - Domain: `quotes.beyondscrumptious.com`
+   - Domain: `hub.beyondscrumptious.com`
    - Policy: **Allow**, with the rule **Emails ending in** `@beyondscrumptious.com`
 3. Open the application and copy its **Application Audience (AUD) Tag**. Your team domain is shown under **Settings → Custom pages** (it looks like `yourteam.cloudflareaccess.com`).
 4. Put both into `ACCESS_AUD` and `ACCESS_TEAM_DOMAIN` in `wrangler.jsonc`, then deploy:
@@ -94,7 +94,7 @@ This adds a **Send to FreeAgent** button to accepted quotes. It creates the quot
 
 1. Go to [dev.freeagent.com](https://dev.freeagent.com), sign in with your FreeAgent login and create an app:
    - **Name:** `Beyond Scrumptious Quotes`
-   - **OAuth redirect URI:** `https://quotes.beyondscrumptious.com/api/freeagent/callback`
+   - **OAuth redirect URI:** `https://hub.beyondscrumptious.com/api/freeagent/callback`
 2. Copy the app's **OAuth identifier** and **OAuth secret**, and store them:
 
 ```bash
@@ -147,6 +147,25 @@ Quotes and invoices download as PDFs on the Beyond Scrumptious template: wordmar
 - **Paid / unpaid:** mark invoices paid on the invoice's page. Unpaid and overdue invoices show on the home page and under **Invoices**.
 - **FreeAgent:** **Send to FreeAgent** on an invoice creates it there with the same number and marks it as sent, for the accounts. FreeAgent doesn't email the client; the client gets the PDF from the app. Record payments in FreeAgent as usual.
 - **Settings:** bank details, the contact lines, the footer line and the questions email that appear on the documents.
+
+## Booking agreements
+
+From an accepted quote, **Create booking agreement** freezes a copy of the booking (client, event, what's included, payment schedule) together with the wording from **Settings → Booking agreement**, and gives you a private signing link to send, with a ready-made WhatsApp message.
+
+- **Signing:** the client opens the link (no login), reads the agreement, types their name and ticks to agree. The app records the name, date and time, connection and device, plus a fingerprint of exactly what was signed. Typed electronic signatures like this are generally valid in the UK.
+- **Links:** for security, the link is only shown when it's created; **Create a new link** replaces it (the old one stops working). Links expire after 60 days.
+- **PDF:** download the agreement, signed or not, on the brand template.
+- **Wording:** the starting text is built only from rules in your quoting SOP, and cancellations point to your Terms & Conditions. Review it, and ideally have it checked, before relying on it.
+- **Cloudflare Access:** the signing pages live under `/p/`, which needs a **Bypass** policy (like `/brand`) so clients aren't asked to log in. Each page only shows the one agreement its link belongs to.
+
+## Event prep sheets
+
+**Event prep sheet** on a quote opens an internal sheet for the day:
+
+- **Quantities** worked out from the quote with the SOP's planning figures (pancakes: 4 per guest, about 110 per 900ml batter bottle, about 50 per batch, 2 staff or 3 from 251 guests, 2 or 2.5 hours of service; croffles: count, venue needs, setup time; cakes: the items).
+- **Fill from chat:** Claude reads the original WhatsApp chat and the quote and fills in arrival and service times, the contact on the day, the address, access, power, allergies, selections and design notes. It only fills empty fields, never what staff typed, and it only uses what the chat actually says.
+- **Checklist:** a starting checklist for the product, which you can tick, edit and add to.
+- **PDF:** a printable sheet with allergies highlighted at the top, marked "Internal · not for clients".
 
 ## Security
 

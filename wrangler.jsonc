@@ -11,6 +11,8 @@
   // Keep variables added in the Cloudflare dashboard when deploying from GitHub.
   "keep_vars": true,
   "routes": [
+    { "pattern": "hub.beyondscrumptious.com", "custom_domain": true },
+    // The old address: kept only so existing links and bookmarks redirect to the hub.
     { "pattern": "quotes.beyondscrumptious.com", "custom_domain": true }
   ],
   "assets": {

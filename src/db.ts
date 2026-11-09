@@ -14,6 +14,8 @@ export interface Settings {
   bank_account_name: string;
   bank_sort_code: string;
   bank_account_number: string;
+  terms_url: string;
+  agreement_template: string;
 }
 
 export interface QuoteRow {
@@ -64,7 +66,8 @@ export async function getSop(db: D1Database): Promise<string> {
 export async function getSettings(db: D1Database): Promise<Settings> {
   const row = await db
     .prepare(`SELECT business_name, vat_rate_percent, deposit_percent, quote_valid_days, quote_terms, contact_lines,
-       footer_tagline, questions_email, bank_account_name, bank_sort_code, bank_account_number
+       footer_tagline, questions_email, bank_account_name, bank_sort_code, bank_account_number, terms_url,
+       agreement_template
      FROM settings WHERE id = 1`)
     .first<Settings>();
   if (!row) throw new Error('Settings row missing: run the database migrations.');
