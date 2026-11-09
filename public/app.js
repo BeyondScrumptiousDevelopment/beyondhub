@@ -824,7 +824,8 @@ async function renderQuote(id) {
   let lastLink = '';
   async function renderAgreementBox() {
     const box = document.getElementById('agreement-box');
-    const agreements = await api(`/api/quotes/${id}/agreements`);
+    const [agreements, me] = await Promise.all([api(`/api/quotes/${id}/agreements`), mePromise]);
+    const online = Boolean(me.online_signing);
     const current = [...agreements].reverse().find((a) => a.status !== 'void');
     const whatsapp = (link) => {
       const first = String(collect().client_name || '').split(' ')[0];
@@ -833,12 +834,22 @@ async function renderQuote(id) {
     if (!current) {
       box.innerHTML = collect().status !== 'accepted'
         ? '<p class="muted">Set the quote to accepted to create a booking agreement.</p>'
-        : `<p class="muted">Recommended for bookings of £300 or more and live stations. It's made from this quote as it is now, so save any changes first.</p>
-           <button id="agr-create" class="primary">Create booking agreement</button>`;
+        : `<p class="muted">Recommended for bookings of £300 or more and live stations. It's filled in from this quote and the event prep sheet as they are now.</p>
+           <button id="agr-create" class="primary">${online ? 'Create booking agreement' : 'Generate booking agreement'}</button>`;
     } else if (current.status === 'signed') {
       box.innerHTML = `<p>${badge('signed')} <strong>${esc(current.number)}</strong> signed by <strong>${esc(current.signed_name)}</strong> on ${esc(formatDate(current.signed_at))}.</p>
-        <div class="row"><button data-agr-pdf="${current.id}" class="primary">Download signed PDF</button>
+        <div class="row"><button data-agr-pdf="${current.id}" class="primary">Download PDF</button>
         <button data-agr-void="${current.id}" class="danger admin-only">Void</button></div>`;
+    } else if (!online) {
+      box.innerHTML = `<p>${badge('sent')} <strong>${esc(current.number)}</strong> generated on ${esc(formatDate(current.created_at))}. Download it, send it to the client to sign, and keep the signed copy in your Google Drive.</p>
+        <div class="row"><button data-agr-pdf="${current.id}" class="primary">Download PDF</button>
+          <button id="agr-mark">Mark as signed</button>
+          <button data-agr-void="${current.id}" class="danger admin-only">Void</button></div>
+        <div id="agr-mark-form" class="grid" style="margin-top:10px" hidden>
+          <label>Signed by<input id="agr-mark-name" value="${esc(collect().client_name || '')}"></label>
+          <label>Date signed<input id="agr-mark-date" type="date" value="${isoToday()}"></label>
+          <button id="agr-mark-save" class="primary" style="align-self:end">Save</button>
+        </div>`;
     } else {
       box.innerHTML = `<p>${badge('sent')} <strong>${esc(current.number)}</strong> is waiting for the client's signature. The link works until ${esc(formatDate(current.expires_at))}.</p>
         ${lastLink ? `<label>Signing link (only shown now; create a new one if you lose it)<input id="agr-link" readonly value="${esc(lastLink)}"></label>
@@ -861,8 +872,14 @@ async function renderQuote(id) {
           create.disabled = false;
           return;
         }
-        lastLink = (await api(`/api/quotes/${id}/agreements`, { method: 'POST' })).link;
-        toast('Booking agreement created. Copy the link to send it.');
+        const created = await api(`/api/quotes/${id}/agreements`, { method: 'POST' });
+        lastLink = created.link;
+        if (online) {
+          toast('Booking agreement created. Copy the link to send it.');
+        } else {
+          toast('Booking agreement generated. Downloading the PDF…');
+          await downloadAgreement(created.id);
+        }
         renderAgreementBox();
       } catch (err) { toast(err.message, true); create.disabled = false; }
     });
@@ -870,6 +887,18 @@ async function renderQuote(id) {
     if (renew) renew.addEventListener('click', async () => {
       if (!confirm('Create a new signing link? The old link will stop working.')) return;
       try { lastLink = (await api(`/api/agreements/${current.id}/link`, { method: 'POST' })).link; renderAgreementBox(); } catch (err) { toast(err.message, true); }
+    });
+    const mark = document.getElementById('agr-mark');
+    if (mark) mark.addEventListener('click', () => { document.getElementById('agr-mark-form').hidden = false; });
+    const markSave = document.getElementById('agr-mark-save');
+    if (markSave) markSave.addEventListener('click', async () => {
+      try {
+        await api(`/api/agreements/${current.id}/mark-signed`, { method: 'POST', json: {
+          signed_name: document.getElementById('agr-mark-name').value, signed_on: document.getElementById('agr-mark-date').value,
+        } });
+        toast('Marked as signed');
+        renderAgreementBox();
+      } catch (err) { toast(err.message, true); }
     });
     const copyText = async (text, what) => {
       try { await navigator.clipboard.writeText(text); toast(`${what} copied`); } catch { toast('Copy failed: select the text and copy it manually', true); }
@@ -906,7 +935,8 @@ async function downloadAgreement(agreementId, button) {
   if (button) button.disabled = true;
   try {
     const [a, settings] = await Promise.all([api(`/api/agreements/${agreementId}`), api('/api/settings')]);
-    await downloadAgreementDocument({ ...a, signed_when: a.signed_at ? ukDateTime(a.signed_at) : '' }, settings);
+    const manual = String(a.signed_user_agent || '').startsWith('Signed copy received');
+    await downloadAgreementDocument({ ...a, manual, signed_when: !a.signed_at ? '' : manual ? formatDate(a.signed_at.slice(0, 10)) : ukDateTime(a.signed_at) }, settings);
   } catch (err) {
     toast(`Couldn't make the PDF: ${err.message}`, true);
   } finally {

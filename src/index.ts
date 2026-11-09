@@ -86,13 +86,18 @@ signing.get('/terms', async (c) => {
   return out;
 });
 
+const onlineSigning = (env: Env) => env.ONLINE_SIGNING === 'true';
+const signingOff = () => messagePage('Online signing is not in use', 'Please contact us and we will send your booking agreement directly.');
+
 signing.get('/:token{[A-Za-z0-9_-]{20,64}}', async (c) => {
+  if (!onlineSigning(c.env)) return c.html(signingOff(), 404);
   const token = c.req.param('token');
   const page = agreementStatePage(await findByToken(c.env.DB, token), token);
   return c.html(page.html, page.status);
 });
 
 signing.post('/:token{[A-Za-z0-9_-]{20,64}}', async (c) => {
+  if (!onlineSigning(c.env)) return c.html(signingOff(), 404);
   const token = c.req.param('token');
   const row = await findByToken(c.env.DB, token);
   if (!row || row.status !== 'sent') {
@@ -216,7 +221,7 @@ app.onError((err, c) => {
 });
 
 app.get('/api/me', (c) =>
-  c.json({ email: c.get('userEmail'), domain: c.env.ALLOWED_DOMAIN, is_admin: c.get('isAdmin') }),
+  c.json({ email: c.get('userEmail'), domain: c.env.ALLOWED_DOMAIN, is_admin: c.get('isAdmin'), online_signing: onlineSigning(c.env) }),
 );
 
 // --- Home page ---------------------------------------------------------------
@@ -735,7 +740,8 @@ app.post('/api/quotes/:id/agreements', async (c) => {
     prep: (await loadPrep(c.env.DB, quote.id)).data,
     paymentReference: deposit?.number ?? '',
   }, c.get('userEmail'));
-  return c.json({ id, link: signingLink(c, token) }, 201);
+  // With online signing off, the agreement is downloaded and sent by hand, so no link is given out.
+  return c.json({ id, link: onlineSigning(c.env) ? signingLink(c, token) : '' }, 201);
 });
 
 app.get('/api/agreements/:id', async (c) => {
@@ -747,6 +753,23 @@ app.get('/api/agreements/:id', async (c) => {
 app.post('/api/agreements/:id/link', async (c) => {
   const token = await renewLink(c.env.DB, idParam(c.req.param('id')));
   return c.json({ link: signingLink(c, token) });
+});
+
+/** Records a signed copy received back (on paper or as a signed PDF) when online signing isn't used. */
+app.post('/api/agreements/:id/mark-signed', async (c) => {
+  const b = await c.req.json<Record<string, unknown>>();
+  const name = str(b.signed_name, 100).replace(/\s+/g, ' ').trim();
+  const date = isoDate(b.signed_on);
+  if (name.length < 2 || !date) throw new UserError('Enter the name of the person who signed and the date.');
+  const result = await c.env.DB.prepare(
+    `UPDATE agreements SET status = 'signed', signed_name = ?, signed_at = ?, signed_ip = '',
+       signed_user_agent = ?, updated_at = datetime('now')
+     WHERE id = ? AND status = 'sent'`,
+  )
+    .bind(name, `${date} 12:00:00`, `Signed copy received, recorded by ${c.get('userEmail')}`, idParam(c.req.param('id')))
+    .run();
+  if (!result.meta.changes) throw new UserError('Only agreements waiting for a signature can be marked as signed.', 409);
+  return c.json({ ok: true });
 });
 
 app.post('/api/agreements/:id/void', requireAdmin, async (c) => {

@@ -50,7 +50,10 @@
     // Most Claude drafts allowed in 24 hours across everyone, to cap the API bill.
     "MAX_DRAFTS_PER_DAY": "200",
     // The public address for signing booking agreements (must match a route above).
-    "SIGNING_HOST": "sign.beyondscrumptious.com"
+    "SIGNING_HOST": "sign.beyondscrumptious.com",
+    // Online signing is off for now: agreements are downloaded as PDFs and sent by hand.
+    // Set to "true" to let clients sign at the address above. The T&Cs PDF at /terms works either way.
+    "ONLINE_SIGNING": "false"
   }
   // Secret (set with `npx wrangler secret put ANTHROPIC_API_KEY`): ANTHROPIC_API_KEY
 }

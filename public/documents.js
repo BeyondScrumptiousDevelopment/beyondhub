@@ -617,15 +617,48 @@ async function downloadAgreementDocument(a, settings) {
   y += 3.2;
   rule(doc, L, y, R, DOC.tint, 0.35);
   y += 7;
-  const signRows = a.status === 'signed'
+  if (a.status === 'void') {
+    setFont(doc, 'DMSans', 8.8, DOC.navy);
+    doc.text('Withdrawn: this agreement is not valid.', L, y);
+    y += 8;
+  } else if (a.status !== 'signed' || a.manual) {
+    // Signature lines, as on the paper form, for signing by hand or in a PDF app.
+    const line = (labelText, x, width, value = '') => {
+      ensure(14);
+      setFont(doc, 'DMSans', 6.2, DOC.slate);
+      spaced(doc, labelText.toUpperCase(), x, y, { space: 0.45 });
+      if (value) { setFont(doc, 'DMSans', 9, DOC.navy); doc.text(docText(value), x, y + 7.2); }
+      doc.setDrawColor(...DOC.navy);
+      doc.setLineWidth(0.25);
+      doc.line(x, y + 9, x + width, y + 9);
+    };
+    const half = (R - L - 10) / 2;
+    const customer = a.status === 'signed' ? a.signed_name : '';
+    line('Customer full name', L, half, customer);
+    line('Date', L + half + 10, half, a.status === 'signed' ? a.signed_when : '');
+    y += 16;
+    line('Customer signature', L, R - L);
+    y += 20;
+    line('For Beyond Scrumptious: name', L, half, 'Naavyen Patel');
+    line('Date', L + half + 10, half);
+    y += 16;
+    line('Signature', L, R - L);
+    y += 16;
+    if (a.status === 'signed') {
+      setFont(doc, 'DMSans', 7.4, DOC.slate);
+      doc.text(docText(`Signed copy received from ${a.signed_name} (${a.signed_when}).`), L, y);
+      y += 6;
+    }
+  }
+  const signRows = a.status === 'signed' && !a.manual
     ? [
       ['Customer full name', a.signed_name],
       ['Customer signature', `Signed electronically by ${a.signed_name}`],
       ['Date', a.signed_when],
       ['Record', `Connection ${a.signed_ip || 'unknown'} · agreement fingerprint ${String(a.content_hash).slice(0, 16)}`],
+      ['For Beyond Scrumptious', `Naavyen Patel · issued ${docDate(c.created_on)}`],
     ]
-    : [['Customer signature', a.status === 'void' ? 'Withdrawn: this agreement is not valid' : 'Awaiting the customer\'s electronic signature']];
-  signRows.push(['For Beyond Scrumptious', `Naavyen Patel · issued ${docDate(c.created_on)}`]);
+    : [];
   signRows.forEach(([k, v]) => {
     setFont(doc, 'DMSans', 8.8, DOC.navy);
     const lines = doc.splitTextToSize(docText(v), R - L - 62);
@@ -641,7 +674,7 @@ async function downloadAgreementDocument(a, settings) {
 
   drawFooters(doc, settings, 'BOOKING AGREEMENT');
   doc.setProperties({ title: `${settings.business_name} booking agreement ${c.number}`, author: settings.business_name });
-  doc.save(`${safeFileName(`${settings.business_name} Booking Agreement ${c.number}${c.client_name ? ' - ' + c.client_name : ''}${a.status === 'signed' ? ' (signed)' : ''}`)}.pdf`);
+  doc.save(`${safeFileName(`${settings.business_name} Booking Agreement ${c.number}${c.client_name ? ' - ' + c.client_name : ''}${a.status === 'signed' && !a.manual ? ' (signed)' : ''}`)}.pdf`);
 }
 
 // ---------- Event prep sheet (internal) ----------
