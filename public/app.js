@@ -150,6 +150,7 @@ const routes = {
   invoices: renderInvoicesList,
   invoice: renderInvoice,
   prep: renderPrep,
+  'new-invoice': renderNewInvoice,
   enquiry: renderEnquiry,
   sop: renderSop,
   prices: renderPrices,
@@ -162,7 +163,7 @@ let currentHash = location.hash;
 async function route() {
   currentHash = location.hash;
   const [, name = 'home', id] = location.hash.split('?')[0].split('/');
-  const section = { quote: 'quotes', invoice: 'invoices', enquiry: 'inbox', prep: 'quotes' }[name] || name;
+  const section = { quote: 'quotes', invoice: 'invoices', enquiry: 'inbox', prep: 'quotes', 'new-invoice': 'invoices' }[name] || name;
   document.querySelectorAll('#nav a').forEach((a) => a.classList.toggle('active', a.dataset.route === section));
   unsavedChanges = false;
   app.innerHTML = '<p class="muted">Loading…</p>';
@@ -226,6 +227,7 @@ async function renderHome() {
       <div class="row">
         <button id="quick-go" class="primary">Draft quote</button>
         <a class="button" href="#/new">Upload an export instead</a>
+        <button id="quick-manual">Write a quote manually</button>
         <span id="quick-state" class="muted"></span>
       </div>
     </section>
@@ -273,6 +275,10 @@ async function renderHome() {
       </section>
     </div>`;
 
+  document.getElementById('quick-manual').addEventListener('click', async () => {
+    const { id } = await api('/api/quotes', { method: 'POST' });
+    location.hash = `#/quote/${id}`;
+  });
   document.getElementById('quick-go').addEventListener('click', async (e) => {
     const text = document.getElementById('quick-text').value.trim();
     if (!text) { toast('Paste a conversation first.', true); return; }
@@ -300,7 +306,7 @@ async function renderQuotes() {
   app.innerHTML = `
     <div class="row"><h1>Quotes</h1><span class="spacer"></span>
       <a class="button" href="#/new">New enquiry</a>
-      <button id="blank">Blank quote</button></div>
+      <button id="blank">Write a quote manually</button></div>
     <div class="panel">
       <div class="row">
         <input id="search" placeholder="Search client, reference, venue…" style="flex:1;min-width:200px">
@@ -847,6 +853,14 @@ async function renderQuote(id) {
       create.disabled = true;
       try {
         if (unsavedChanges) await save();
+        // The agreement fills its blanks from the event prep sheet, so point out what's still empty.
+        const { data: prep } = await api(`/api/quotes/${id}/prep`);
+        const missing = [['service_time', 'serving times'], ['arrival_time', 'arrival time'], ['contact_on_day', 'on-the-day contact'],
+          ['venue_address', 'venue address'], ['selections', 'toppings and sauces']].filter(([k]) => !String(prep[k] || '').trim()).map(([, l]) => l);
+        if (missing.length && !confirm(`The event prep sheet doesn't have: ${missing.join(', ')}. These will show as "To be confirmed" in the agreement.\n\nTip: open the Event prep sheet and use "Fill from chat" first.\n\nCreate the agreement anyway?`)) {
+          create.disabled = false;
+          return;
+        }
         lastLink = (await api(`/api/quotes/${id}/agreements`, { method: 'POST' })).link;
         toast('Booking agreement created. Copy the link to send it.');
         renderAgreementBox();
@@ -923,10 +937,11 @@ async function renderInvoicesList() {
   const today = isoToday();
   app.innerHTML = `
     <div class="row"><h1>Invoices</h1><span class="spacer"></span>
+      <a class="button primary" href="#/new-invoice">New manual invoice</a>
       <select id="inv-status" style="width:auto">
         <option value="">All</option><option value="issued">Unpaid</option><option value="paid">Paid</option><option value="void">Void</option>
       </select></div>
-    <p class="muted">Issue invoices from an accepted quote's page. Each one is a frozen copy of its quote, so later edits to the quote don't change it.</p>
+    <p class="muted">Issue invoices from an accepted quote's page, or use <strong>New manual invoice</strong> for one-off jobs. Each invoice is a frozen copy, so later edits never change it.</p>
     <div class="panel"><div class="table-wrap"><table>
       <thead><tr><th>Invoice</th><th>Client</th><th>Type</th><th>Issued</th><th>Due</th><th class="num">Amount</th><th>Status</th></tr></thead>
       <tbody>${rows.length ? rows.map((i) => `
@@ -1113,11 +1128,10 @@ async function renderSettings() {
         <label>Email for questions<input id="questions_email" type="email" value="${esc(s.questions_email)}"></label>
       </div>
       <h2>Booking agreement</h2>
-      <p class="muted">The wording clients see and sign. Start a section with <code>## Heading</code>. These fill in automatically:
-        <code>{{client_name}}</code> <code>{{event_type}}</code> <code>{{event_date}}</code> <code>{{venue}}</code> <code>{{guests}}</code>
-        <code>{{quote_reference}}</code> <code>{{total}}</code> <code>{{deposit}}</code> <code>{{balance}}</code> <code>{{balance_due_date}}</code>
-        <code>{{payment_schedule}}</code> <code>{{terms_url}}</code> <code>{{business_name}}</code>.
-        Changes apply to new agreements only. Have the wording checked before relying on it.</p>
+      <p class="muted">Your Booking Agreement wording. <code>## 1. Heading</code> starts a section, <code>| Label | value</code> is a field,
+        <code>- </code> is a bullet and <code>{{payment_table}}</code> is the payment schedule. Values in <code>{{double braces}}</code> fill in from the quote and the
+        event prep sheet (anything unknown shows as "To be confirmed"). Changes apply to new agreements only.
+        <a href="/legal/beyond-scrumptious-terms-and-conditions-2026-08.pdf" target="_blank" rel="noopener">Terms &amp; Conditions (PDF)</a>, shown to clients when they sign.</p>
       <label>Terms &amp; Conditions link<input id="terms_url" type="url" value="${esc(s.terms_url)}"></label><br>
       <label>Agreement wording<textarea id="agreement_template" class="tall" style="min-height:380px">${esc(s.agreement_template)}</textarea></label>
       <h2>Bank details for invoices</h2>
@@ -1388,4 +1402,125 @@ async function renderPrep(quoteId) {
       await downloadPrepDocument(q, prep, facts, settings);
     } catch (err) { toast(`Couldn't make the PDF: ${err.message}`, true); } finally { e.target.disabled = false; }
   });
+}
+
+// ---------- manual invoice ----------
+
+async function renderNewInvoice() {
+  const [prices, numbering] = await Promise.all([api('/api/prices'), api('/api/invoice-numbering')]);
+  const activePrices = prices.filter((p) => p.active);
+  const today = isoToday();
+  const items = [{ description: '', quantity: 1, unit: 'each', unit_price_pence: 0, price_item_id: null }];
+  app.innerHTML = `
+    <div class="row"><h1>New manual invoice</h1><span class="spacer"></span><a class="button" href="#/invoices">Cancel</a></div>
+    <p class="muted">For one-off jobs without a quote. The next number will be <strong>${esc(numbering.next_reference)}</strong>${''} (it follows FreeAgent when connected).</p>
+    <div class="panel">
+      <h2 style="margin-top:0">Billed to</h2>
+      <div class="grid">
+        <label>Client name<input id="m-client_name"></label>
+        <label>Email<input id="m-client_email" type="email"></label>
+        <label>Phone<input id="m-client_phone"></label>
+        <label>Billing address<textarea id="m-client_address" rows="2" style="min-height:0"></textarea></label>
+      </div>
+      <h2>For</h2>
+      <div class="grid">
+        <label>What it's for<input id="m-event_type" placeholder="e.g. Birthday cake"></label>
+        <label>Event / collection date<input id="m-event_date" type="date"></label>
+        <label>Venue (optional)<input id="m-venue"></label>
+      </div>
+    </div>
+    <div class="panel">
+      <h2 style="margin-top:0">Lines</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th style="width:50%">Description</th><th class="num">Qty</th><th class="num">Unit price £</th><th class="num">Total</th><th></th></tr></thead>
+        <tbody id="m-lines"></tbody>
+      </table></div><br>
+      <div class="row">
+        <select id="m-add-price" style="width:auto;max-width:100%">
+          <option value="">Add from price list…</option>
+          ${activePrices.map((p) => `<option value="${p.id}">${esc(p.category ? p.category + ' – ' : '')}${esc(p.name)} (${money(p.price_pence)} / ${esc(p.unit)})</option>`).join('')}
+        </select>
+        <button id="m-add">Add line</button>
+      </div><br>
+      <div class="row" style="align-items:flex-start">
+        <div class="grid" style="flex:1;min-width:240px">
+          <label>Discount £<input id="m-discount" type="number" step="0.01" min="0" value="0.00"></label>
+          <label>Invoice date<input id="m-issued" type="date" value="${today}"></label>
+          <label>Due<input id="m-due" type="date" value="${addDays(today, 7)}"></label>
+        </div>
+        <div class="totals" id="m-totals"></div>
+      </div>
+      <label>Notes (optional, kept with the invoice)<textarea id="m-notes" rows="2" style="min-height:0"></textarea></label><br>
+      <button id="m-issue" class="primary">Issue invoice</button>
+    </div>`;
+
+  const body = document.getElementById('m-lines');
+  const total = () => computeTotals(items, toPence(document.getElementById('m-discount').value), 0, 0).total;
+  const draw = () => {
+    body.innerHTML = items.map((i, idx) => `
+      <tr data-idx="${idx}">
+        <td><input data-k="description" value="${esc(i.description)}" placeholder="What was provided"></td>
+        <td class="num"><input data-k="quantity" type="number" step="any" value="${esc(i.quantity)}" style="width:80px"></td>
+        <td class="num"><input data-k="price" type="number" step="0.01" value="${toPounds(i.unit_price_pence)}" style="width:100px"></td>
+        <td class="num">${money(Math.round(Number(i.quantity || 0) * i.unit_price_pence))}</td>
+        <td class="num"><button data-k="remove" class="danger" title="Remove">✕</button></td>
+      </tr>`).join('');
+    drawTotals();
+  };
+  const drawTotals = () => {
+    document.getElementById('m-totals').innerHTML = `<div class="grand"><span>Total</span><span>${money(total())}</span></div>`;
+  };
+  body.addEventListener('input', (e) => {
+    const tr = e.target.closest('tr[data-idx]');
+    if (!tr) return;
+    const item = items[Number(tr.dataset.idx)];
+    if (e.target.dataset.k === 'description') item.description = e.target.value;
+    if (e.target.dataset.k === 'quantity') item.quantity = Number(e.target.value);
+    if (e.target.dataset.k === 'price') { item.unit_price_pence = toPence(e.target.value); item.price_item_id = null; }
+    tr.children[3].textContent = money(Math.round(Number(item.quantity || 0) * item.unit_price_pence));
+    unsavedChanges = true;
+    drawTotals();
+  });
+  body.addEventListener('click', (e) => {
+    if (e.target.dataset.k !== 'remove') return;
+    items.splice(Number(e.target.closest('tr').dataset.idx), 1);
+    draw();
+  });
+  document.getElementById('m-add').addEventListener('click', () => {
+    items.push({ description: '', quantity: 1, unit: 'each', unit_price_pence: 0, price_item_id: null });
+    draw();
+  });
+  document.getElementById('m-add-price').addEventListener('change', (e) => {
+    const p = activePrices.find((x) => String(x.id) === e.target.value);
+    if (!p) return;
+    const blank = items.findIndex((i) => !i.description && !i.unit_price_pence);
+    const line = { description: p.name, quantity: 1, unit: p.unit, unit_price_pence: p.price_pence, price_item_id: p.id };
+    if (blank >= 0) items[blank] = line; else items.push(line);
+    e.target.value = '';
+    draw();
+  });
+  document.getElementById('m-discount').addEventListener('input', drawTotals);
+  app.querySelectorAll('input, textarea').forEach((el) => el.addEventListener('input', () => { unsavedChanges = true; }));
+
+  document.getElementById('m-issue').addEventListener('click', async (e) => {
+    const v = (id) => document.getElementById(id).value;
+    if (!v('m-client_name').trim()) { toast("Add the client's name.", true); return; }
+    if (!confirm(`Issue invoice ${numbering.next_reference} for ${money(total())}?`)) return;
+    e.target.disabled = true;
+    try {
+      const res = await api('/api/invoices/manual', { method: 'POST', json: {
+        client_name: v('m-client_name'), client_email: v('m-client_email'), client_phone: v('m-client_phone'),
+        client_address: v('m-client_address'), event_type: v('m-event_type'), event_date: v('m-event_date'), venue: v('m-venue'),
+        line_items: items, discount_pence: toPence(v('m-discount')), issued_on: v('m-issued'), due_on: v('m-due'),
+        client_notes: v('m-notes'),
+      } });
+      unsavedChanges = false;
+      if (res.warning) toast(res.warning, true); else toast(`Invoice ${res.number} issued`);
+      location.hash = `#/invoice/${res.id}`;
+    } catch (err) {
+      toast(err.message, true);
+      e.target.disabled = false;
+    }
+  });
+  draw();
 }

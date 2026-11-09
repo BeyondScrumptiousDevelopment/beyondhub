@@ -150,13 +150,23 @@ Quotes and invoices download as PDFs on the Beyond Scrumptious template: wordmar
 
 ## Booking agreements
 
-From an accepted quote, **Create booking agreement** freezes a copy of the booking (client, event, what's included, payment schedule) together with the wording from **Settings → Booking agreement**, and gives you a private signing link to send, with a ready-made WhatsApp message.
+The agreement is the owner's **Booking Agreement V1** (Live Mini Pancake Station), word for word, with its blanks filled in automatically:
 
-- **Signing:** the client opens the link (no login), reads the agreement, types their name and ticks to agree. The app records the name, date and time, connection and device, plus a fingerprint of exactly what was signed. Typed electronic signatures like this are generally valid in the UK.
-- **Links:** for security, the link is only shown when it's created; **Create a new link** replaces it (the old one stops working). Links expire after 60 days.
-- **PDF:** download the agreement, signed or not, on the brand template.
-- **Wording:** the starting text is built only from rules in your quoting SOP, and cancellations point to your Terms & Conditions. Review it, and ideally have it checked, before relying on it.
-- **Cloudflare Access:** the signing pages live under `/p/`, which needs a **Bypass** policy (like `/brand`) so clients aren't asked to log in. Each page only shows the one agreement its link belongs to.
+- **From the quote:** customer details, event, package, extras, total and the payment schedule (the quote's real deposit and balance date).
+- **From the event prep sheet:** the on-the-day contact, venue address, serving times, arrival time, toppings and sauces, power and parking, and allergies.
+- **From the deposit invoice:** the payment reference.
+
+Anything unknown shows as "To be confirmed", so fill in the prep sheet (**Fill from chat**) before creating the agreement; the app reminds you. The wording can be edited under **Settings → Booking agreement**: `## 1. Heading` starts a section, `| Label | value` is a field, `- ` is a bullet and `{{payment_table}}` is the payment schedule.
+
+- **Signing:** clients sign at **`sign.beyondscrumptious.com/<private link>`**. This address sits outside the staff login and serves only signing pages, the T&Cs and the logo; I tested that the Hub's pages and data aren't reachable from it. The client reads the agreement, opens the **Terms & Conditions (PDF)**, types their name and ticks to agree. The app records the name, UK date and time, connection, device and a fingerprint of exactly what was signed. No paid signing service is used.
+- **Links:** for security, the link is only shown when it's created; **Create a new link** replaces it. Links expire after 60 days.
+- **PDF:** the agreement downloads from the Hub, signed or not, laid out like the branded Terms & Conditions, with the electronic signature record in place of the signature lines.
+- **Terms & Conditions:** the branded PDF (August 2026) is at `sign.beyondscrumptious.com/terms` for clients, and linked from Settings for staff.
+
+## Manual quotes and invoices
+
+- **Write a quote manually** (home page and Quotes page) opens a blank quote to fill in yourself.
+- **New manual invoice** (Invoices page) is for one-off jobs without a quote: enter the client and lines (typed, or from the price list), and it issues a branded invoice with the next FreeAgent-matching number. Behind the scenes it's kept as an accepted quote marked "Manual invoice", so it works like every other invoice.
 
 ## Event prep sheets
 

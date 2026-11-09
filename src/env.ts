@@ -6,6 +6,8 @@ export interface Env {
   ACCESS_TEAM_DOMAIN: string;
   ACCESS_AUD: string;
   CLAUDE_MODEL: string;
+  /** Where clients sign booking agreements, e.g. sign.beyondscrumptious.com (outside the staff login). */
+  SIGNING_HOST?: string;
   /** From the app registered at dev.freeagent.com. Optional: the FreeAgent button is hidden without them. */
   FREEAGENT_CLIENT_ID?: string;
   FREEAGENT_CLIENT_SECRET?: string;

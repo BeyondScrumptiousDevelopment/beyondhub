@@ -44,9 +44,14 @@ app.get('/brand/*', async (c) => {
   return c.env.ASSETS.fetch(new URL(path, c.req.url));
 });
 
-// ---- Public: booking agreement signing (the only pages clients can open) ----------------
-// Each page shows only the one agreement its private link belongs to. Rate-limited per visitor.
-app.use('/p/*', async (c, next) => {
+// ---- Public: booking agreement signing --------------------------------------------------
+// Clients sign at SIGNING_HOST (sign.beyondscrumptious.com/<private link>), which sits outside the
+// staff login and serves nothing but these pages. Each page shows only the one agreement its link
+// belongs to, and visitors are rate-limited.
+
+const signing = new Hono<AppContext>();
+
+signing.use('*', async (c, next) => {
   const limiter = c.env.API_LIMITER;
   if (limiter) {
     const { success } = await limiter.limit({ key: `public:${c.req.header('cf-connecting-ip') ?? 'unknown'}` });
@@ -68,13 +73,26 @@ function agreementStatePage(row: AgreementRow | null, token: string, error = '')
   return { status: 200 as const, html: signPage(row, content, token, error) };
 }
 
-app.get('/p/sign/:token', async (c) => {
+signing.get('/brand/wordmark-navy.png', (c) => c.env.ASSETS.fetch(new URL('/brand/wordmark-navy.png', c.req.url)));
+
+signing.get('/', (c) => c.html(messagePage('Booking agreements', 'Please open the signing link we sent you.')));
+
+// The branded Terms & Conditions (August 2026), so clients can read them before signing.
+const TERMS_PDF = '/legal/beyond-scrumptious-terms-and-conditions-2026-08.pdf';
+signing.get('/terms', async (c) => {
+  const res = await c.env.ASSETS.fetch(new URL(TERMS_PDF, c.req.url));
+  const out = new Response(res.body, res);
+  out.headers.set('Content-Disposition', 'inline; filename="Beyond Scrumptious Terms and Conditions (August 2026).pdf"');
+  return out;
+});
+
+signing.get('/:token{[A-Za-z0-9_-]{20,64}}', async (c) => {
   const token = c.req.param('token');
   const page = agreementStatePage(await findByToken(c.env.DB, token), token);
   return c.html(page.html, page.status);
 });
 
-app.post('/p/sign/:token', async (c) => {
+signing.post('/:token{[A-Za-z0-9_-]{20,64}}', async (c) => {
   const token = c.req.param('token');
   const row = await findByToken(c.env.DB, token);
   if (!row || row.status !== 'sent') {
@@ -97,6 +115,20 @@ app.post('/p/sign/:token', async (c) => {
     .run();
   const page = agreementStatePage(await c.env.DB.prepare('SELECT * FROM agreements WHERE id = ?').bind(row.id).first<AgreementRow>(), token);
   return c.html(page.html, page.status);
+});
+
+signing.all('*', (c) => c.html(messagePage('Page not found', 'Please open the signing link we sent you.'), 404));
+signing.onError((err, c) => {
+  console.error(err);
+  return c.html(messagePage('Something went wrong', 'Please try again in a moment.'), 500);
+});
+
+/** The signing address only ever reaches the signing pages above. */
+app.use('*', async (c, next) => {
+  if (new URL(c.req.url).hostname === (c.env.SIGNING_HOST || 'sign.beyondscrumptious.com')) {
+    return signing.fetch(c.req.raw, c.env, c.executionCtx);
+  }
+  await next();
 });
 
 app.use('*', requireStaff);
@@ -528,6 +560,67 @@ app.post('/api/quotes/:id/invoices', async (c) => {
   return c.json({ ...created, warning }, 201);
 });
 
+/**
+ * An invoice typed in by hand, for one-off jobs without a quote. It's stored as an accepted quote
+ * marked "Manual invoice" so it shares numbering, the frozen copy, paid tracking and FreeAgent.
+ */
+app.post('/api/invoices/manual', async (c) => {
+  const b = await c.req.json<Record<string, unknown>>();
+  const issuedOn = isoDate(b.issued_on);
+  const dueOn = isoDate(b.due_on);
+  if (!issuedOn || !dueOn) throw new UserError('Enter the invoice date and the due date.');
+  const items = sanitiseLineItems(b.line_items)
+    .filter((i) => i.description.trim() && i.quantity !== 0)
+    .map((i) => ({ ...i, needs_review: false, review_reason: '' }));
+  if (!items.length) throw new UserError('Add at least one line.');
+  const by = c.get('userEmail');
+  const quoteId = await createQuoteFromDraft(c.env.DB, null, emptyDraft(), by);
+  const settings = await getSettings(c.env.DB);
+  await updateQuote(c.env.DB, quoteId, {
+    status: 'accepted',
+    client_name: str(b.client_name, 200),
+    client_phone: str(b.client_phone, 50),
+    client_email: str(b.client_email, 200),
+    client_address: str(b.client_address, 500),
+    event_type: str(b.event_type, 200),
+    event_date: isoDate(b.event_date),
+    event_time: '',
+    venue: str(b.venue, 500),
+    guests: null,
+    summary: 'Manual invoice',
+    line_items: items,
+    discount_pence: Math.min(100_000_000, Math.max(0, Math.round(num(b.discount_pence)))),
+    vat_rate_percent: settings.vat_rate_percent,
+    deposit_percent: 0,
+    deposit_fixed_pence: null,
+    client_notes: str(b.client_notes, 20_000),
+    internal_notes: 'Created as a manual invoice.',
+    questions: [],
+    reply_message: '',
+    final_payment_due: dueOn,
+    payment_rule: 'custom',
+  }, by);
+  const quote = await c.env.DB.prepare('SELECT * FROM quotes WHERE id = ?').bind(quoteId).first<QuoteRow>();
+  let freeAgentNext: NumberSequence | null = null;
+  let warning = '';
+  if ((await freeagent.connectionStatus(c.env)).connected) {
+    try {
+      freeAgentNext = (await freeagent.nextFreeAgentInvoiceNumber(c.env))?.next ?? null;
+    } catch (err) {
+      console.error('Could not read FreeAgent invoice numbers', err);
+      warning = "Couldn't check FreeAgent's latest invoice number, so the app's own sequence was used. Check it matches before sending.";
+    }
+  }
+  try {
+    const created = await createInvoice(c.env.DB, quote!, { kind: 'full', issued_on: issuedOn, due_on: dueOn }, by, freeAgentNext);
+    return c.json({ ...created, quote_id: quoteId, warning }, 201);
+  } catch (err) {
+    // Don't leave a stray record behind if the invoice couldn't be issued.
+    await c.env.DB.prepare('DELETE FROM quotes WHERE id = ?').bind(quoteId).run();
+    throw err;
+  }
+});
+
 app.get('/api/invoices/:id', async (c) => {
   const row = await c.env.DB.prepare('SELECT * FROM invoices WHERE id = ?').bind(idParam(c.req.param('id'))).first<InvoiceRow>();
   return row ? c.json(invoiceToJson(row)) : c.json({ error: 'Not found' }, 404);
@@ -617,7 +710,7 @@ app.post('/api/invoices/:id/freeagent', async (c) => {
 
 // --- Booking agreements (staff) -----------------------------------------------------
 
-const signingLink = (c: { req: { url: string } }, token: string) => `${new URL(c.req.url).origin}/p/sign/${token}`;
+const signingLink = (c: { env: Env }, token: string) => `https://${c.env.SIGNING_HOST || 'sign.beyondscrumptious.com'}/${token}`;
 
 app.get('/api/quotes/:id/agreements', async (c) => {
   const { results } = await c.env.DB.prepare(
@@ -632,7 +725,16 @@ app.get('/api/quotes/:id/agreements', async (c) => {
 app.post('/api/quotes/:id/agreements', async (c) => {
   const quote = await c.env.DB.prepare('SELECT * FROM quotes WHERE id = ?').bind(idParam(c.req.param('id'))).first<QuoteRow>();
   if (!quote) throw new UserError('Not found', 404);
-  const { id, token } = await createAgreement(c.env.DB, quote, await getSettings(c.env.DB), c.get('userEmail'));
+  // The agreement's blanks are filled from the quote and the event prep sheet.
+  const deposit = await c.env.DB.prepare(
+    "SELECT number FROM invoices WHERE quote_id = ? AND kind IN ('deposit', 'full') AND status <> 'void' ORDER BY id LIMIT 1",
+  )
+    .bind(quote.id)
+    .first<{ number: string }>();
+  const { id, token } = await createAgreement(c.env.DB, quote, await getSettings(c.env.DB), {
+    prep: (await loadPrep(c.env.DB, quote.id)).data,
+    paymentReference: deposit?.number ?? '',
+  }, c.get('userEmail'));
   return c.json({ id, link: signingLink(c, token) }, 201);
 });
 

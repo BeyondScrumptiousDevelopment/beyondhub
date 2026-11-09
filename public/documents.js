@@ -440,7 +440,7 @@ function textFlow(doc, assets, settings, startY) {
     para(text, { color = DOC.slate, size = 9, x = L, width = R - L, gap = 2.4 } = {}) {
       setFont(doc, 'DMSans', size, color);
       const lines = doc.splitTextToSize(docText(text), width);
-      lines.forEach((line) => { flow.ensure(5); doc.text(line, x, flow.y); flow.y += size * 0.47; });
+      lines.forEach((line) => { flow.ensure(5); setFont(doc, 'DMSans', size, color); doc.text(line, x, flow.y); flow.y += size * 0.47; });
       flow.y += gap;
     },
     rows(rows, { labelWidth = 38 } = {}) {
@@ -493,73 +493,151 @@ function drawDetailBlocks(doc, leftTitle, left, rightTitle, right) {
   return 88 + Math.max(left.length, right.length) * 8.2 + 6;
 }
 
-// ---------- Booking agreement ----------
+// ---------- Booking agreement (laid out like the branded Terms & Conditions) ----------
+
+/** The compact header used on every page of long documents: small wordmark left, title right. */
+function drawCompactHeader(doc, assets, rightText) {
+  const { left: L, right: R } = DOC;
+  const props = doc.getImageProperties(assets.logo);
+  const w = 34;
+  doc.addImage(assets.logo, 'PNG', L, 9, w, (w * props.height) / props.width, 'wordmark', 'FAST');
+  setFont(doc, 'DMSans', 6.2, DOC.slate);
+  spaced(doc, rightText.toUpperCase(), R, 13, { space: 0.55, align: 'right' });
+  rule(doc, L, 18, R);
+}
+
+function agreementBlocks(section) {
+  return section.blocks || (section.paragraphs || []).map((text) => ({ type: 'p', text }));
+}
 
 async function downloadAgreementDocument(a, settings) {
   const c = a.content;
   const assets = await loadPdfAssets();
   const doc = newBrandedDoc(assets);
   const { left: L, right: R } = DOC;
-  drawHeader(doc, assets, settings);
-  drawBand(doc, 'BOOKING AGREEMENT', ['YOUR', 'booking'], [
-    ['Agreement no.', c.number], ['Date', docDate(c.created_on)], ['Quote ref.', c.quote_reference],
-  ]);
-  let y = drawDetailBlocks(doc, 'Client', clientRows(c), 'Event', eventRows(c));
+  const headerText = `Booking agreement · ${c.number}`;
+  const header = () => drawCompactHeader(doc, assets, headerText);
 
-  window.autoTable(doc, {
-    startY: y,
-    margin: { left: L, right: DOC.pageW - R, top: 40, bottom: 22 },
-    head: [['WHAT\'S INCLUDED', 'QTY', 'AMOUNT']],
-    body: c.items.map((i) => [docText(i.description), docText(`${i.quantity}${i.unit && !['each', 'booking', 'cake'].includes(i.unit) ? ' ' + i.unit : ''}`), docMoney(i.amount_pence)]),
-    theme: 'plain',
-    styles: { font: 'DMSans', fontSize: 8.6, textColor: DOC.navy, cellPadding: { top: 2.6, bottom: 2.6, left: 2, right: 2 } },
-    headStyles: { fontSize: 6.2, cellPadding: { top: 1, bottom: 3, left: 2, right: 2 } },
-    columnStyles: { 1: { cellWidth: 24, halign: 'right' }, 2: { cellWidth: 28, halign: 'right' } },
-    didParseCell: (cell) => { if (cell.section === 'head' && cell.column.index > 0) cell.cell.styles.halign = 'right'; },
-    willDrawCell: (cell) => { if (cell.section === 'head') doc.setCharSpace(0.55); },
-    didDrawCell: (cell) => {
-      doc.setCharSpace(0);
-      if (cell.column.index === 2) rule(doc, L, cell.cell.y + cell.cell.height, R, cell.section === 'head' ? DOC.navy : DOC.tint, cell.section === 'head' ? 0.35 : 0.25);
-    },
-    didDrawPage: () => { if (doc.getCurrentPageInfo().pageNumber > 1) drawHeader(doc, assets, settings); },
-  });
-  const flow = textFlow(doc, assets, settings, doc.lastAutoTable.finalY + 7);
-  const sums = [['Total', docMoney(c.total_pence)]];
-  if (c.deposit_pence) {
-    sums.push(['Deposit to secure your date', docMoney(c.deposit_pence)]);
-    sums.push([`Balance${c.balance_due ? ` due by ${docDate(c.balance_due)}` : ''}`, docMoney(c.balance_pence)]);
-  }
-  sums.forEach(([k, v], i) => {
-    flow.ensure(7);
-    setFont(doc, i === 0 ? 'Playfair' : 'DMSans', i === 0 ? 11 : 8.8, DOC.navy);
-    doc.text(docText(k), 115.6, flow.y);
-    doc.text(v, R - 2, flow.y, { align: 'right' });
-    flow.y += 6.4;
-  });
-  flow.y += 2;
+  // Title band, as on the Terms & Conditions
+  header();
+  doc.setFillColor(...DOC.surface);
+  doc.rect(L, 24, R - L, 30, 'F');
+  label(doc, `${c.service_name || 'Booking'} · ${c.number}`, L + 6, 33);
+  setFont(doc, 'Playfair', 24, DOC.navy);
+  const w = spaced(doc, 'BOOKING', L + 6, 46, { space: 0.3 });
+  setFont(doc, 'Cormorant', 26, DOC.navy, 'italic');
+  doc.text('Agreement', L + 6 + w + 3, 46);
 
-  c.sections.forEach((s) => {
-    if (s.heading) flow.heading(s.heading);
-    s.paragraphs.forEach((p) => flow.para(p));
+  let y = 64;
+  const ensure = (h) => { if (y + h > 274) { doc.addPage(); header(); y = 28; } };
+  const para = (text, { color = DOC.navy, size = 8.8 } = {}) => {
+    setFont(doc, 'DMSans', size, color);
+    const lines = doc.splitTextToSize(docText(text), R - L);
+    if (lines.length <= 6) ensure(lines.length * 4.3 + 1); // don't split short paragraphs across pages
+    // A page break draws the header, which changes the font, so set it again before each line.
+    lines.forEach((line) => { ensure(4.6); setFont(doc, 'DMSans', size, color); doc.text(line, L, y); y += 4.3; });
+    y += 2.4;
+  };
+
+  c.sections.forEach((section) => {
+    if (section.heading) {
+      ensure(18);
+      y += 4;
+      if (section.number) {
+        setFont(doc, 'Cormorant', 15, DOC.navy, 'italic');
+        doc.text(section.number, L, y);
+      }
+      setFont(doc, 'Playfair', 11.5, DOC.navy);
+      spaced(doc, section.heading.toUpperCase(), L + (section.number ? 10 : 0), y, { space: 0.4 });
+      y += 3.2;
+      rule(doc, L, y, R, DOC.tint, 0.35);
+      y += 6;
+    }
+    agreementBlocks(section).forEach((block) => {
+      if (block.type === 'p') para(block.text);
+      if (block.type === 'list') {
+        block.items.forEach((item) => {
+          setFont(doc, 'DMSans', 8.8, DOC.navy);
+          const lines = doc.splitTextToSize(docText(item), R - L - 7);
+          ensure(lines.length * 4.3 + 1.5);
+          setFont(doc, 'DMSans', 8.8, DOC.navy);
+          doc.circle(L + 1.6, y - 1.05, 0.45, 'F');
+          lines.forEach((line) => { doc.text(line, L + 5.5, y); y += 4.3; });
+          y += 1;
+        });
+        y += 1.6;
+      }
+      if (block.type === 'fields') {
+        block.rows.forEach(([k, v]) => {
+          setFont(doc, 'DMSans', 8.8, DOC.navy);
+          const valueX = L + 62;
+          const lines = doc.splitTextToSize(docText(v), R - valueX);
+          // Letter spacing isn't counted when wrapping, so wrap labels narrower than their column.
+          const labelLines = doc.setFont('DMSans', 'normal').setFontSize(6.2).splitTextToSize(docText(k).toUpperCase(), 40);
+          const h = Math.max(lines.length * 4.3, labelLines.length * 3.2) + 3.6;
+          ensure(h + 1);
+          setFont(doc, 'DMSans', 6.2, DOC.slate);
+          labelLines.forEach((line, i) => spaced(doc, line, L, y + i * 3.2, { space: 0.45 }));
+          setFont(doc, 'DMSans', 8.8, v === 'To be confirmed' ? DOC.slate : DOC.navy);
+          lines.forEach((line, i) => doc.text(line, valueX, y + i * 4.3));
+          y += h - 2.2;
+          rule(doc, L, y, R);
+          y += 4.6;
+        });
+        y += 1;
+      }
+      if (block.type === 'payments') {
+        ensure(10 + block.rows.length * 8);
+        window.autoTable(doc, {
+          startY: y - 3,
+          margin: { left: L, right: DOC.pageW - R, top: 26, bottom: 22 },
+          head: [['PAYMENT', 'AMOUNT', 'DUE DATE']],
+          body: [...block.rows.map((r) => r.map(docText)), ['Total', docText(block.total), '']],
+          theme: 'plain',
+          styles: { font: 'DMSans', fontSize: 8.8, textColor: DOC.navy, cellPadding: { top: 2.8, bottom: 2.8, left: 2, right: 2 } },
+          headStyles: { fontSize: 6.2, cellPadding: { top: 1, bottom: 3, left: 2, right: 2 } },
+          willDrawCell: (cell) => { if (cell.section === 'head') doc.setCharSpace(0.55); },
+          didParseCell: (cell) => { if (cell.section === 'body' && cell.row.index === block.rows.length) cell.cell.styles.fontStyle = 'bold'; },
+          didDrawCell: (cell) => {
+            doc.setCharSpace(0);
+            if (cell.column.index === 2) rule(doc, L, cell.cell.y + cell.cell.height, R, cell.section === 'head' ? DOC.navy : DOC.tint, cell.section === 'head' ? 0.35 : 0.25);
+          },
+          didDrawPage: () => { if (doc.getCurrentPageInfo().pageNumber > 1) header(); },
+        });
+        y = doc.lastAutoTable.finalY + 7;
+      }
+    });
   });
 
-  // Signature record
-  flow.heading('Signature');
-  if (a.status === 'signed') {
-    flow.ensure(26);
-    doc.setFillColor(...DOC.mist);
-    doc.setDrawColor(...DOC.tint);
-    doc.rect(L, flow.y - 4, R - L, 21, 'FD');
-    flow.y += 2;
-    flow.para(`Signed electronically by ${a.signed_name}`, { color: DOC.navy, size: 10, x: L + 4, width: R - L - 8, gap: 1 });
-    flow.para(`on ${a.signed_when}, agreeing to this booking agreement on behalf of ${c.client_name}.`, { x: L + 4, width: R - L - 8, gap: 1 });
-    flow.para(`Record: connection ${a.signed_ip || 'unknown'} · agreement fingerprint ${String(a.content_hash).slice(0, 16)}`, { size: 7.4, x: L + 4, width: R - L - 8, gap: 0 });
-    flow.y += 4;
-  } else {
-    flow.para(a.status === 'void'
-      ? 'This agreement was withdrawn and is not valid.'
-      : 'Awaiting the client\'s signature. The client signs online using the private link we send them.', { color: DOC.navy });
-  }
+  // Electronic signature record (in place of the signature lines on the paper form)
+  ensure(40);
+  y += 4;
+  setFont(doc, 'Playfair', 11.5, DOC.navy);
+  spaced(doc, 'SIGNATURES', L, y, { space: 0.4 });
+  y += 3.2;
+  rule(doc, L, y, R, DOC.tint, 0.35);
+  y += 7;
+  const signRows = a.status === 'signed'
+    ? [
+      ['Customer full name', a.signed_name],
+      ['Customer signature', `Signed electronically by ${a.signed_name}`],
+      ['Date', a.signed_when],
+      ['Record', `Connection ${a.signed_ip || 'unknown'} · agreement fingerprint ${String(a.content_hash).slice(0, 16)}`],
+    ]
+    : [['Customer signature', a.status === 'void' ? 'Withdrawn: this agreement is not valid' : 'Awaiting the customer\'s electronic signature']];
+  signRows.push(['For Beyond Scrumptious', `Naavyen Patel · issued ${docDate(c.created_on)}`]);
+  signRows.forEach(([k, v]) => {
+    setFont(doc, 'DMSans', 8.8, DOC.navy);
+    const lines = doc.splitTextToSize(docText(v), R - L - 62);
+    ensure(lines.length * 4.3 + 5);
+    setFont(doc, 'DMSans', 6.2, DOC.slate);
+    spaced(doc, k.toUpperCase(), L, y, { space: 0.45 });
+    setFont(doc, 'DMSans', 8.8, DOC.navy);
+    lines.forEach((line, i) => doc.text(line, L + 62, y + i * 4.3));
+    y += lines.length * 4.3 + 1.4;
+    rule(doc, L, y, R);
+    y += 4.6;
+  });
 
   drawFooters(doc, settings, 'BOOKING AGREEMENT');
   doc.setProperties({ title: `${settings.business_name} booking agreement ${c.number}`, author: settings.business_name });
@@ -617,6 +695,7 @@ async function downloadPrepDocument(q, prep, facts, settings) {
       setFont(doc, 'DMSans', 9, DOC.navy);
       const lines = doc.splitTextToSize(docText(c.item), R - L - 10);
       flow.ensure(lines.length * 4.4 + 2.5);
+      setFont(doc, 'DMSans', 9, DOC.navy);
       doc.setDrawColor(...DOC.navy);
       doc.setLineWidth(0.3);
       doc.rect(L, flow.y - 3.3, 3.6, 3.6);

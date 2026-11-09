@@ -12,6 +12,8 @@
   "keep_vars": true,
   "routes": [
     { "pattern": "hub.beyondscrumptious.com", "custom_domain": true },
+    // Clients sign booking agreements here. It sits outside the staff login and only serves signing pages.
+    { "pattern": "sign.beyondscrumptious.com", "custom_domain": true },
     // The old address: kept only so existing links and bookmarks redirect to the hub.
     { "pattern": "quotes.beyondscrumptious.com", "custom_domain": true }
   ],
@@ -46,7 +48,9 @@
     // Comma-separated. Everyone else on the domain can still draft, edit and send quotes.
     "ADMIN_EMAILS": "naavyen@beyondscrumptious.com",
     // Most Claude drafts allowed in 24 hours across everyone, to cap the API bill.
-    "MAX_DRAFTS_PER_DAY": "200"
+    "MAX_DRAFTS_PER_DAY": "200",
+    // The public address for signing booking agreements (must match a route above).
+    "SIGNING_HOST": "sign.beyondscrumptious.com"
   }
   // Secret (set with `npx wrangler secret put ANTHROPIC_API_KEY`): ANTHROPIC_API_KEY
 }

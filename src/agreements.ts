@@ -2,6 +2,13 @@ import type { QuoteRow, Settings } from './db';
 import type { LineItem } from './pricing';
 import { computeTotals } from './pricing';
 import { UserError } from './security';
+import type { PrepData } from './prep';
+
+export type AgreementBlock =
+  | { type: 'p'; text: string }
+  | { type: 'fields'; rows: [string, string][] }
+  | { type: 'list'; items: string[] }
+  | { type: 'payments'; rows: [string, string, string][]; total: string };
 
 /** The agreement exactly as the client sees and signs it, frozen when it is created. */
 export interface AgreementContent {
@@ -23,7 +30,8 @@ export interface AgreementContent {
   deposit_pence: number;
   balance_pence: number;
   balance_due: string;
-  sections: { heading: string; paragraphs: string[] }[];
+  service_name: string;
+  sections: { number: string; heading: string; blocks: AgreementBlock[] }[];
 }
 
 export interface AgreementRow {
@@ -70,54 +78,143 @@ function newToken(): string {
 
 export const tokenHash = sha256;
 
-function paymentSchedule(total: number, deposit: number, balanceDue: string): string {
-  const by = balanceDue ? `by ${longDate(balanceDue)}` : 'before the event';
-  if (deposit > 0 && deposit < total) {
-    return `The total is ${pounds(total)}. A deposit of ${pounds(deposit)} is due to secure your date, and the balance of ${pounds(total - deposit)} is due ${by}.`;
-  }
-  if (deposit >= total && total > 0) return `The total of ${pounds(total)} is due in full to confirm your order.`;
-  return `The total is ${pounds(total)}, due ${by}.`;
+const TBC = 'To be confirmed';
+const orTbc = (v: unknown) => (String(v ?? '').trim() ? String(v).trim() : TBC);
+
+function serviceFor(items: LineItem[], eventType: string) {
+  const text = items.map((i) => i.description).join(' | ');
+  if (/pancake station/i.test(text)) return { name: 'Live Mini Pancake Station', food: 'mini pancakes cooked fresh on-site', product: 'pancake' };
+  if (/croffle/i.test(text)) return { name: 'Live Croffle Station', food: 'croffles prepared fresh on-site', product: 'croffle' };
+  if (/\bcake\b/i.test(text)) return { name: 'celebration cake order', food: 'a handmade cake prepared', product: 'cake' };
+  return { name: eventType || 'booking', food: 'the agreed items prepared', product: 'other' };
 }
 
-/** Fills the template's {{placeholders}} and splits it into "## Heading" sections and paragraphs. */
-export function buildContent(quote: QuoteRow, settings: Settings & { agreement_template: string; terms_url: string }, number: string): AgreementContent {
+/** "6pm–8pm" or "18:00 - 20:00" into start and finish. */
+function splitTimes(value: string): [string, string] {
+  const parts = value.split(/\s*(?:–|—|-|to)\s*/i).map((p) => p.trim()).filter(Boolean);
+  return parts.length >= 2 ? [parts[0], parts[1]] : [value.trim(), ''];
+}
+
+/** Separates a phone number from "Raj (venue manager) 07700 900456". */
+function splitContact(value: string): [string, string] {
+  const phone = /(\+?\d[\d\s]{8,}\d)/.exec(value);
+  if (!phone) return [value.trim(), ''];
+  return [value.replace(phone[1], '').replace(/\s{2,}/g, ' ').replace(/[,;–-]\s*$/, '').trim(), phone[1].trim()];
+}
+
+function pickLine(text: string, label: RegExp): string {
+  const line = text.split('\n').find((l) => label.test(l));
+  return line ? line.replace(label, '').replace(/^[\s:–-]+/, '').trim() : '';
+}
+
+export interface AgreementInputs {
+  prep: PrepData;
+  /** The deposit invoice's number, used as the payment reference when there is one. */
+  paymentReference: string;
+}
+
+/**
+ * Fills the template's {{placeholders}} from the quote and the event prep sheet, and turns it into
+ * numbered sections of paragraphs, fields ("| Label | value"), bullets ("- ") and the payment table.
+ */
+export function buildContent(
+  quote: QuoteRow,
+  settings: Settings & { agreement_template: string; terms_url: string },
+  number: string,
+  inputs: AgreementInputs,
+): AgreementContent {
   const items = JSON.parse(quote.line_items) as LineItem[];
   const t = computeTotals(items, quote.discount_pence, quote.vat_rate_percent, quote.deposit_percent, quote.deposit_fixed_pence);
-  const deposit = t.deposit_pence;
+  const deposit = t.deposit_pence > 0 && t.deposit_pence < t.total_pence ? t.deposit_pence : 0;
+  const prep = inputs.prep;
+  const service = serviceFor(items, quote.event_type);
+  const [contactName, contactPhone] = splitContact(prep.contact_on_day);
+  const [start, finish] = splitTimes(prep.service_time || quote.event_time);
+  const guests = quote.guests ?? 0;
+  const mainLine = items.find((i) => /station\s*–/i.test(i.description)) ?? null;
+  const pkg = (/\b(Classic|Deluxe|Signature)\b/.exec(items.map((i) => i.description).join(' ')) || [])[1] || '';
+  const plural = (n: number, unit: string) => (n !== 1 && unit && !unit.endsWith('s') ? `${unit}s` : unit);
+  const extras = items.filter((i) => i !== mainLine).map((i) => (i.quantity !== 1 ? `${i.description} (${i.quantity} ${plural(i.quantity, i.unit)})` : i.description));
+  const duration = service.product === 'pancake' && guests
+    ? guests <= 150 ? '2 hours' : guests <= 300 ? '2.5 hours' : 'Bespoke, to be agreed'
+    : '';
+  const percent = (part: number) => (t.total_pence ? `${Math.round((part / t.total_pence) * 100)}%` : '');
+  const paymentRows: [string, string, string][] = deposit
+    ? [
+      [`Booking deposit (${percent(deposit)})`, pounds(deposit), 'Upon booking confirmation'],
+      [`Remaining balance (${percent(t.total_pence - deposit)})`, pounds(t.total_pence - deposit), longDate(quote.final_payment_due) || TBC],
+    ]
+    : [['Full payment', pounds(t.total_pence), longDate(quote.final_payment_due) || 'Upon booking confirmation']];
+
   const values: Record<string, string> = {
     business_name: settings.business_name,
-    client_name: quote.client_name || 'the client',
-    event_type: quote.event_type || 'event',
-    event_date: longDate(quote.event_date) || 'the agreed date',
-    event_time: quote.event_time,
-    venue: quote.venue || 'the agreed venue',
-    guests: quote.guests ? String(quote.guests) : '',
     quote_reference: quote.reference,
+    agreement_number: number,
+    agreement_date: longDate(new Date().toISOString().slice(0, 10)),
+    service_name: service.name,
+    service_name_lower: service.name.replace(/^Live /, 'live ').replace('Mini Pancake Station', 'mini pancake station').replace('Croffle Station', 'croffle station'),
+    service_food: service.food,
+    client_name: orTbc(quote.client_name),
+    client_phone: orTbc(quote.client_phone),
+    client_email: orTbc(quote.client_email),
+    client_address: orTbc(quote.client_address.replace(/\s*\n\s*/g, ', ')),
+    event_type: orTbc(quote.event_type),
+    event_date: orTbc(longDate(quote.event_date)),
+    venue: orTbc(quote.venue),
+    venue_address: orTbc(prep.venue_address || quote.venue),
+    guests: orTbc(quote.guests ? String(quote.guests) : ''),
+    contact_name: orTbc(contactName),
+    contact_phone: orTbc(contactPhone),
+    package: orTbc(pkg),
+    toppings: orTbc(pickLine(prep.selections, /^\s*toppings?\b/i)),
+    sauces: orTbc(pickLine(prep.selections, /^\s*sauces?\b/i)),
+    extras: extras.length ? extras.join('; ') : 'None',
+    serving_duration: orTbc(duration),
+    serving_start: orTbc(start),
+    serving_finish: orTbc(finish),
+    arrival_time: orTbc(prep.arrival_time),
     total: pounds(t.total_pence),
-    deposit: pounds(deposit),
-    balance: pounds(Math.max(0, t.total_pence - deposit)),
-    balance_due_date: longDate(quote.final_payment_due),
+    deposit_due: deposit ? 'Upon booking confirmation' : 'Not applicable',
+    balance_due_date: orTbc(longDate(quote.final_payment_due)),
+    payment_reference: inputs.paymentReference || 'Your invoice number',
+    table_provided_by: /table/i.test(prep.power_setup) ? prep.power_setup : TBC,
+    power_confirmed: prep.power_setup.trim() ? `Yes: ${prep.power_setup.trim()}` : TBC,
+    parking: orTbc(prep.access_parking),
+    other_venue: 'None noted',
+    allergies: prep.allergies.trim() || 'None disclosed',
+    allergy_arrangements: prep.allergies.trim() ? TBC : 'Not applicable',
     terms_url: settings.terms_url,
-    payment_schedule: paymentSchedule(t.total_pence, deposit, quote.final_payment_due),
   };
-  const fill = (s: string) => s.replace(/\{\{\s*([a-z_]+)\s*\}\}/g, (_, key: string) => values[key] ?? '');
+  const fill = (text: string) => text.replace(/\{\{\s*([a-z_]+)\s*\}\}/g, (_, key: string) => values[key] ?? '');
 
-  const sections: AgreementContent['sections'] = [];
-  let current: AgreementContent['sections'][number] | null = null;
-  for (const block of settings.agreement_template.replace(/\r/g, '').split(/\n\s*\n|\n(?=## )/)) {
-    const text = block.trim();
-    if (!text) continue;
-    const heading = /^##\s+(.*)$/m.exec(text);
-    if (heading && text.startsWith('##')) {
-      current = { heading: fill(heading[1].trim()), paragraphs: [] };
-      sections.push(current);
-      const rest = text.slice(text.indexOf('\n') + 1).trim();
-      if (text.includes('\n') && rest) current.paragraphs.push(fill(rest.replace(/\s*\n\s*/g, ' ')));
-    } else {
-      if (!current) { current = { heading: '', paragraphs: [] }; sections.push(current); }
-      current.paragraphs.push(fill(text.replace(/\s*\n\s*/g, ' ')));
+  const sections: AgreementContent['sections'] = [{ number: '', heading: '', blocks: [] }];
+  const current = () => sections[sections.length - 1];
+  const push = (block: AgreementBlock) => {
+    const blocks = current().blocks;
+    const last = blocks[blocks.length - 1];
+    if (block.type === 'fields' && last?.type === 'fields') last.rows.push(...block.rows);
+    else if (block.type === 'list' && last?.type === 'list') last.items.push(...block.items);
+    else blocks.push(block);
+  };
+  let paragraph: string[] = [];
+  const flush = () => { if (paragraph.length) { push({ type: 'p', text: fill(paragraph.join(' ')) }); paragraph = []; } };
+
+  for (const raw of settings.agreement_template.replace(/\r/g, '').split('\n')) {
+    const line = raw.trim();
+    if (!line) { flush(); continue; }
+    const heading = /^##\s+(?:(\d+)[.)]?\s+)?(.*)$/.exec(line);
+    if (heading) { flush(); sections.push({ number: heading[1] ?? '', heading: fill(heading[2]), blocks: [] }); continue; }
+    if (line.startsWith('|')) {
+      flush();
+      const [label, ...rest] = line.replace(/^\|\s*/, '').split('|');
+      push({ type: 'fields', rows: [[fill(label.trim()), fill(rest.join('|').trim()) || TBC]] });
+      continue;
     }
+    if (/^[-•]\s+/.test(line)) { flush(); push({ type: 'list', items: [fill(line.replace(/^[-•]\s+/, ''))] }); continue; }
+    if (line === '{{payment_table}}') { flush(); push({ type: 'payments', rows: paymentRows, total: pounds(t.total_pence) }); continue; }
+    paragraph.push(line);
   }
+  flush();
 
   return {
     number,
@@ -137,10 +234,11 @@ export function buildContent(quote: QuoteRow, settings: Settings & { agreement_t
       description: i.description, quantity: i.quantity, unit: i.unit, amount_pence: Math.round(i.quantity * i.unit_price_pence),
     })),
     total_pence: t.total_pence,
-    deposit_pence: deposit < t.total_pence ? deposit : 0,
-    balance_pence: deposit < t.total_pence ? t.total_pence - deposit : 0,
+    deposit_pence: deposit,
+    balance_pence: deposit ? t.total_pence - deposit : 0,
     balance_due: quote.final_payment_due,
-    sections,
+    service_name: service.name,
+    sections: sections.filter((sec) => sec.heading || sec.blocks.length),
   };
 }
 
@@ -156,6 +254,7 @@ export async function createAgreement(
   db: D1Database,
   quote: QuoteRow,
   settings: Settings & { agreement_template: string; terms_url: string },
+  inputs: AgreementInputs,
   by: string,
 ): Promise<{ id: number; token: string }> {
   if (quote.status !== 'accepted') throw new UserError('Set the quote to accepted before creating a booking agreement.', 409);
@@ -169,7 +268,7 @@ export async function createAgreement(
 
   for (let attempt = 0; ; attempt++) {
     const number = await nextAgreementNumber(db);
-    const content = JSON.stringify(buildContent(quote, settings, number));
+    const content = JSON.stringify(buildContent(quote, settings, number, inputs));
     const token = newToken();
     try {
       const row = await db
