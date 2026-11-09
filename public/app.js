@@ -804,19 +804,24 @@ async function renderQuote(id) {
       document.getElementById('inv-due-label').textContent = kind === 'scheduled' ? 'Final payment due' : 'Due';
       // Deposits are due on receipt; balances and full payments by the final payment date.
       dueEl.value = kind === 'deposit' ? issued : (payDue.value || issued);
-      // On a scheduled invoice the deposit is due 14 days after the invoice date, but never after the final date.
-      const twoWeeks = addDays(issued, 14);
-      depDueEl.value = dueEl.value && twoWeeks > dueEl.value ? dueEl.value : twoWeeks;
+      // On a scheduled invoice the deposit date is left for you to choose.
+      const depositWhen = depDueEl.value ? `due ${formatDate(depDueEl.value)}` : 'due on the date you choose above';
       const summary = kind === 'scheduled'
-        ? `Total ${money(t.total)}: deposit ${money(t.deposit)} due ${formatDate(depDueEl.value)}, balance ${money(t.total - t.deposit)} due ${formatDate(dueEl.value)}.`
+        ? `Total ${money(t.total)}: deposit ${money(t.deposit)} ${depositWhen}, balance ${money(t.total - t.deposit)} due ${formatDate(dueEl.value)}.`
         : `Amount due: ${money(kind === 'deposit' ? t.deposit : kind === 'balance' ? t.total - toPence(depEl.value) : t.total)}.`;
       document.getElementById('inv-summary').textContent = `${summary} The invoice is a copy of the quote as it is now, so save any changes first.`;
     };
     kindEl.addEventListener('change', refresh);
     depEl.addEventListener('input', refresh);
     document.getElementById('inv-issued').addEventListener('change', refresh);
+    depDueEl.addEventListener('change', refresh);
     refresh();
     document.getElementById('inv-create').addEventListener('click', async (e) => {
+      if (kindEl.value === 'scheduled' && !depDueEl.value) {
+        toast('Enter the date the deposit is due.', true);
+        depDueEl.focus();
+        return;
+      }
       e.target.disabled = true;
       try {
         if (unsavedChanges) await save();

@@ -189,7 +189,8 @@ export async function createInvoice(
       throw new UserError('This quote has no separate deposit. Issue a full invoice instead.');
     }
     depositPart = snapshot.deposit_pence;
-    depositDueOn = input.deposit_due_on || input.issued_on;
+    depositDueOn = input.deposit_due_on ?? '';
+    if (!depositDueOn) throw new UserError('Enter the date the deposit is due.');
     if (depositDueOn < input.issued_on || depositDueOn > input.due_on) {
       throw new UserError('The deposit must be due between the invoice date and the final payment date.');
     }
