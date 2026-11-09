@@ -378,7 +378,12 @@ export async function sendInvoice(
     }
   }
 
+  // FreeAgent has one due date per invoice, so a scheduled invoice is due on its final date and the
+  // deposit date goes in the notes; part payments are matched in FreeAgent as they arrive.
+  const gbp = (pence: number) => `£${(pence / 100).toFixed(2)}`;
   const comments = [
+    inv.kind === 'scheduled'
+      && `Payment schedule: deposit ${gbp(inv.deposit_pence)} due by ${inv.deposit_due_on}; balance ${gbp(inv.amount_due_pence - inv.deposit_pence)} due by ${inv.due_on}.`,
     s.event_type && `Event: ${s.event_type}`,
     s.event_date && `Date: ${s.event_date}`,
     s.venue && `Venue: ${s.venue}`,

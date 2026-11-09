@@ -95,6 +95,7 @@ td input, td select { padding: 5px 7px; }
 .badge.accepted, .badge.drafted, .badge.paid, .badge.signed { color: var(--ok); border-color: var(--ok); }
 .badge.declined, .badge.error, .badge.void { color: var(--danger); border-color: var(--danger); }
 .badge.unpaid { color: var(--accent); border-color: var(--accent); }
+.badge.part_paid { color: #9a6700; border-color: #d4a72c; }
 .warn { background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: 8px; padding: 10px 12px; }
 .totals { margin-left: auto; min-width: 280px; }
 .totals div { display: flex; justify-content: space-between; padding: 3px 0; }

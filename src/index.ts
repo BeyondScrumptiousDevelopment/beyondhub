@@ -15,7 +15,8 @@ import { agreementToJson, createAgreement, findByToken, renewLink, type Agreemen
 import { messagePage, signPage, signedPage } from './signpage';
 import { emptyPrep, extractPrep, sanitisePrep, type PrepData } from './prep';
 import {
-  INVOICE_KINDS, createInvoice, formatReference, invoiceToJson, nextInvoiceSequence, paidDeposit, setNumbering,
+  INVOICE_KINDS, NEXT_DUE_SQL, createInvoice, formatReference, invoiceToJson, nextInvoiceSequence, paidDeposit, refreshPaid,
+  setNumbering, type PaymentRow,
   type InvoiceKind, type InvoiceRow, type NumberSequence,
 } from './invoices';
 import {
@@ -237,9 +238,9 @@ app.get('/api/dashboard', async (c) => {
          SUM(status = 'accepted' AND status_changed_at >= date('now', 'start of month')) AS accepted_this_month,
          COALESCE(SUM(CASE WHEN status = 'accepted' AND status_changed_at >= date('now', 'start of month') THEN total_pence END), 0) AS accepted_value_this_month,
          SUM(status = 'accepted' AND event_date BETWEEN date('now') AND date('now', '+30 days')) AS events_next_30_days,
-         (SELECT COUNT(*) FROM invoices WHERE status = 'issued') AS unpaid_invoices,
-         (SELECT COALESCE(SUM(amount_due_pence), 0) FROM invoices WHERE status = 'issued') AS unpaid_value,
-         (SELECT COUNT(*) FROM invoices WHERE status = 'issued' AND due_on < date('now')) AS overdue_invoices
+         (SELECT COUNT(*) FROM invoices WHERE status IN ('issued', 'part_paid')) AS unpaid_invoices,
+         (SELECT COALESCE(SUM(amount_due_pence - paid_pence), 0) FROM invoices WHERE status IN ('issued', 'part_paid')) AS unpaid_value,
+         (SELECT COUNT(*) FROM invoices i WHERE i.status IN ('issued', 'part_paid') AND ${NEXT_DUE_SQL} < date('now')) AS overdue_invoices
        FROM quotes`,
     ),
     db.prepare(
@@ -512,13 +513,16 @@ app.delete('/api/quotes/:id', requireAdmin, async (c) => {
 // --- Invoices ------------------------------------------------------------------
 
 const INVOICE_LIST_COLUMNS = `i.id, i.number, i.kind, i.status, i.issued_on, i.due_on, i.paid_on, i.amount_due_pence,
-  i.total_pence, i.quote_id, i.freeagent_url, json_extract(i.snapshot, '$.client_name') AS client_name,
+  i.total_pence, i.quote_id, i.freeagent_url, i.paid_pence, i.deposit_pence, i.deposit_due_on, ${NEXT_DUE_SQL} AS next_due_on,
+  json_extract(i.snapshot, '$.client_name') AS client_name,
   json_extract(i.snapshot, '$.quote_reference') AS quote_reference, json_extract(i.snapshot, '$.event_date') AS event_date`;
 
 app.get('/api/invoices', async (c) => {
   const status = str(c.req.query('status'), 20);
   const { results } = await c.env.DB.prepare(
-    `SELECT ${INVOICE_LIST_COLUMNS} FROM invoices i WHERE (?1 = '' OR i.status = ?1) ORDER BY i.id DESC LIMIT 300`,
+    // "unpaid" covers both nothing paid and part paid.
+    `SELECT ${INVOICE_LIST_COLUMNS} FROM invoices i
+     WHERE (?1 = '' OR i.status = ?1 OR (?1 = 'unpaid' AND i.status IN ('issued', 'part_paid'))) ORDER BY i.id DESC LIMIT 300`,
   )
     .bind(status)
     .all();
@@ -538,7 +542,7 @@ app.post('/api/quotes/:id/invoices', async (c) => {
   const id = idParam(c.req.param('id'));
   const b = await c.req.json<Record<string, unknown>>();
   const kind = str(b.kind, 10) as InvoiceKind;
-  if (!INVOICE_KINDS.includes(kind)) throw new UserError('Choose a deposit, balance or full invoice.');
+  if (!INVOICE_KINDS.includes(kind)) throw new UserError('Choose which kind of invoice to issue.');
   const issuedOn = isoDate(b.issued_on);
   const dueOn = isoDate(b.due_on);
   if (!issuedOn || !dueOn) throw new UserError('Enter the invoice date and the due date.');
@@ -561,6 +565,7 @@ app.post('/api/quotes/:id/invoices', async (c) => {
     due_on: dueOn,
     deposit_paid_pence: Math.min(100_000_000, Math.max(0, Math.round(num(b.deposit_paid_pence)))),
     deposit_paid_on: isoDate(b.deposit_paid_on),
+    deposit_due_on: isoDate(b.deposit_due_on),
   }, c.get('userEmail'), freeAgentNext);
   return c.json({ ...created, warning }, 201);
 });
@@ -627,8 +632,13 @@ app.post('/api/invoices/manual', async (c) => {
 });
 
 app.get('/api/invoices/:id', async (c) => {
-  const row = await c.env.DB.prepare('SELECT * FROM invoices WHERE id = ?').bind(idParam(c.req.param('id'))).first<InvoiceRow>();
-  return row ? c.json(invoiceToJson(row)) : c.json({ error: 'Not found' }, 404);
+  const id = idParam(c.req.param('id'));
+  const row = await c.env.DB.prepare('SELECT * FROM invoices WHERE id = ?').bind(id).first<InvoiceRow>();
+  if (!row) return c.json({ error: 'Not found' }, 404);
+  const { results: payments } = await c.env.DB.prepare(
+    'SELECT * FROM invoice_payments WHERE invoice_id = ? ORDER BY paid_on, id',
+  ).bind(id).all<PaymentRow>();
+  return c.json({ ...invoiceToJson(row), payments });
 });
 
 // The "next" shown is what the next invoice will really get: never a number already used.
@@ -660,19 +670,33 @@ app.post('/api/invoice-numbering/match-freeagent', requireAdmin, async (c) => {
   return c.json({ ...seq, next_reference: formatReference(seq), freeagent_latest: found.latest });
 });
 
-// Paid / not paid. Voided invoices stay void.
-app.post('/api/invoices/:id/status', async (c) => {
+// Payments: an invoice can be paid in parts (e.g. the deposit, then the balance).
+app.post('/api/invoices/:id/payments', async (c) => {
+  const id = idParam(c.req.param('id'));
+  const inv = await c.env.DB.prepare('SELECT status, amount_due_pence, paid_pence FROM invoices WHERE id = ?').bind(id)
+    .first<{ status: string; amount_due_pence: number; paid_pence: number }>();
+  if (!inv) throw new UserError('Not found', 404);
+  if (inv.status === 'void') throw new UserError('That invoice is void.', 409);
   const b = await c.req.json<Record<string, unknown>>();
-  const paid = b.status === 'paid';
-  const paidOn = paid ? isoDate(b.paid_on) : '';
-  if (paid && !paidOn) throw new UserError('Enter the date it was paid.');
-  const result = await c.env.DB.prepare(
-    `UPDATE invoices SET status = ?, paid_on = ?, updated_by = ?, updated_at = datetime('now')
-     WHERE id = ? AND status <> 'void'`,
-  )
-    .bind(paid ? 'paid' : 'issued', paidOn, c.get('userEmail'), idParam(c.req.param('id')))
+  const amount = Math.round(num(b.amount_pence));
+  const paidOn = isoDate(b.paid_on);
+  const outstanding = inv.amount_due_pence - inv.paid_pence;
+  if (!paidOn) throw new UserError('Enter the date it was paid.');
+  if (amount <= 0) throw new UserError('Enter the amount paid.');
+  if (amount > outstanding) throw new UserError(`That's more than the £${(outstanding / 100).toFixed(2)} still owed.`);
+  await c.env.DB.prepare('INSERT INTO invoice_payments (invoice_id, amount_pence, paid_on, note, created_by) VALUES (?, ?, ?, ?, ?)')
+    .bind(id, amount, paidOn, str(b.note, 200), c.get('userEmail'))
     .run();
-  if (!result.meta.changes) throw new UserError('That invoice is void, or doesn’t exist.', 409);
+  await refreshPaid(c.env.DB, id);
+  return c.json({ ok: true }, 201);
+});
+
+app.delete('/api/invoices/:id/payments/:paymentId', async (c) => {
+  const id = idParam(c.req.param('id'));
+  await c.env.DB.prepare('DELETE FROM invoice_payments WHERE id = ? AND invoice_id = ?')
+    .bind(idParam(c.req.param('paymentId')), id)
+    .run();
+  await refreshPaid(c.env.DB, id);
   return c.json({ ok: true });
 });
 

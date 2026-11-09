@@ -55,7 +55,7 @@ async function api(path, options = {}) {
 }
 
 function badge(status) {
-  return `<span class="badge ${esc(status)}">${esc(status)}</span>`;
+  return `<span class="badge ${esc(status)}">${esc(String(status).replace(/_/g, ' '))}</span>`;
 }
 
 // Computes the same totals as the server (src/pricing.ts) so the editor updates live.
@@ -237,7 +237,7 @@ async function renderHome() {
       ${tile('#/quotes?status=sent', 'Awaiting reply', n(c.awaiting_reply), 'quotes sent to clients')}
       ${tile('#/quotes?status=accepted', 'Accepted this month', n(c.accepted_this_month), `${money(c.accepted_value_this_month)} booked`)}
       ${tile('#/quotes?status=accepted', 'Events coming up', n(c.events_next_30_days), 'in the next 30 days')}
-      ${tile('#/invoices?status=issued', 'Unpaid invoices', n(c.unpaid_invoices), `${money(c.unpaid_value)} due${n(c.overdue_invoices) ? ` · ${n(c.overdue_invoices)} overdue` : ''}`)}
+      ${tile('#/invoices?status=unpaid', 'Unpaid invoices', n(c.unpaid_invoices), `${money(c.unpaid_value)} due${n(c.overdue_invoices) ? ` · ${n(c.overdue_invoices)} overdue` : ''}`)}
     </div>
 
     <div class="piping" aria-hidden="true"></div>
@@ -751,7 +751,7 @@ async function renderQuote(id) {
       <thead><tr><th>Invoice</th><th>Type</th><th>Due</th><th class="num">Amount</th><th>Status</th><th></th></tr></thead>
       <tbody>${invoices.map((i) => `<tr>
         <td><a href="#/invoice/${i.id}">${esc(i.number)}</a></td><td>${esc(INVOICE_KIND_LABELS[i.kind])}</td>
-        <td>${esc(formatDate(i.due_on))}</td><td class="num">${money(i.amount_due_pence)}</td><td>${badge(i.status)}</td>
+        <td>${esc(formatDate(nextDue(i)))}</td><td class="num">${money(i.amount_due_pence)}</td><td>${badge(invoiceStatus(i).replace(' ', '_'))}</td>
         <td class="num"><button data-pdf="${i.id}">Download PDF</button></td></tr>`).join('')}</tbody></table></div>`
       : '<p class="muted">No invoices yet.</p>';
     list.querySelectorAll('[data-pdf]').forEach((b) => b.addEventListener('click', () => downloadInvoice(b.dataset.pdf, b)));
@@ -761,25 +761,28 @@ async function renderQuote(id) {
     const hasDeposit = t.deposit > 0 && t.deposit < t.total;
     const hasLive = (kind) => live.some((i) => i.kind === kind);
     // Suggest the next invoice: deposit first, then the balance once the deposit is paid.
-    const suggested = !hasDeposit ? 'full' : !hasLive('deposit') ? 'deposit' : 'balance';
+    // With a deposit, suggest one invoice carrying both payments; after a separate deposit invoice, the balance.
+    const suggested = !hasDeposit ? 'full' : !hasLive('deposit') ? 'scheduled' : 'balance';
     const newBox = document.getElementById('invoice-new');
     if (collect().status !== 'accepted') {
       newBox.innerHTML = '<p class="muted">Set the quote to accepted to issue invoices.</p>';
       return;
     }
-    if (live.some((i) => i.kind === 'full') || hasLive('balance')) {
+    if (live.some((i) => i.kind === 'full' || i.kind === 'scheduled') || hasLive('balance')) {
       newBox.innerHTML = '<p class="muted">This booking has been fully invoiced.</p>';
       return;
     }
     newBox.innerHTML = `
       <div class="grid">
         <label>Invoice for<select id="inv-kind">
-          ${hasDeposit && !hasLive('deposit') ? '<option value="deposit">Deposit</option>' : ''}
-          ${hasDeposit ? '<option value="balance">Balance (after the deposit)</option>' : ''}
+          ${hasDeposit && !hasLive('deposit') ? '<option value="scheduled">Deposit + balance on one invoice</option>' : ''}
+          ${hasDeposit && !hasLive('deposit') ? '<option value="deposit">Deposit only</option>' : ''}
+          ${hasDeposit ? '<option value="balance">Balance only (after a deposit invoice)</option>' : ''}
           ${!hasLive('deposit') ? '<option value="full">Full amount</option>' : ''}
         </select></label>
         <label>Invoice date<input id="inv-issued" type="date" value="${isoToday()}"></label>
-        <label>Due<input id="inv-due" type="date"></label>
+        <label class="inv-scheduled">Deposit due<input id="inv-dep-due" type="date"></label>
+        <label><span id="inv-due-label">Due</span><input id="inv-due" type="date"></label>
         <label class="inv-balance">Deposit paid £<input id="inv-dep" type="number" step="0.01" min="0"></label>
         <label class="inv-balance">Deposit paid on<input id="inv-dep-on" type="date"></label>
       </div>
@@ -792,13 +795,22 @@ async function renderQuote(id) {
     const depOnEl = document.getElementById('inv-dep-on');
     depEl.value = toPounds(paidDeposit ? paidDeposit.amount_due_pence : t.deposit);
     depOnEl.value = paidDeposit ? paidDeposit.paid_on : '';
+    const depDueEl = document.getElementById('inv-dep-due');
     const refresh = () => {
       const kind = kindEl.value;
+      const issued = document.getElementById('inv-issued').value;
       app.querySelectorAll('.inv-balance').forEach((el) => { el.style.display = kind === 'balance' ? '' : 'none'; });
+      app.querySelectorAll('.inv-scheduled').forEach((el) => { el.style.display = kind === 'scheduled' ? '' : 'none'; });
+      document.getElementById('inv-due-label').textContent = kind === 'scheduled' ? 'Final payment due' : 'Due';
       // Deposits are due on receipt; balances and full payments by the final payment date.
-      dueEl.value = kind === 'deposit' ? document.getElementById('inv-issued').value : (payDue.value || document.getElementById('inv-issued').value);
-      const amount = kind === 'deposit' ? t.deposit : kind === 'balance' ? t.total - toPence(depEl.value) : t.total;
-      document.getElementById('inv-summary').textContent = `Amount due: ${money(amount)}. The invoice is a copy of the quote as it is now, so save any changes first.`;
+      dueEl.value = kind === 'deposit' ? issued : (payDue.value || issued);
+      // On a scheduled invoice the deposit is due 14 days after the invoice date, but never after the final date.
+      const twoWeeks = addDays(issued, 14);
+      depDueEl.value = dueEl.value && twoWeeks > dueEl.value ? dueEl.value : twoWeeks;
+      const summary = kind === 'scheduled'
+        ? `Total ${money(t.total)}: deposit ${money(t.deposit)} due ${formatDate(depDueEl.value)}, balance ${money(t.total - t.deposit)} due ${formatDate(dueEl.value)}.`
+        : `Amount due: ${money(kind === 'deposit' ? t.deposit : kind === 'balance' ? t.total - toPence(depEl.value) : t.total)}.`;
+      document.getElementById('inv-summary').textContent = `${summary} The invoice is a copy of the quote as it is now, so save any changes first.`;
     };
     kindEl.addEventListener('change', refresh);
     depEl.addEventListener('input', refresh);
@@ -810,7 +822,7 @@ async function renderQuote(id) {
         if (unsavedChanges) await save();
         const res = await api(`/api/quotes/${id}/invoices`, { method: 'POST', json: {
           kind: kindEl.value, issued_on: document.getElementById('inv-issued').value, due_on: dueEl.value,
-          deposit_paid_pence: toPence(depEl.value), deposit_paid_on: depOnEl.value,
+          deposit_paid_pence: toPence(depEl.value), deposit_paid_on: depOnEl.value, deposit_due_on: depDueEl.value,
         } });
         if (res.warning) toast(res.warning, true); else toast(`Invoice ${res.number} issued`);
         location.hash = `#/invoice/${res.id}`;
@@ -944,7 +956,7 @@ async function downloadAgreement(agreementId, button) {
   }
 }
 
-const INVOICE_KIND_LABELS = { deposit: 'Deposit', balance: 'Balance', full: 'Full amount' };
+const INVOICE_KIND_LABELS = { deposit: 'Deposit', balance: 'Balance', full: 'Full amount', scheduled: 'Deposit + balance' };
 
 async function downloadInvoice(invoiceId, button) {
   if (button) button.disabled = true;
@@ -969,7 +981,7 @@ async function renderInvoicesList() {
     <div class="row"><h1>Invoices</h1><span class="spacer"></span>
       <a class="button primary" href="#/new-invoice">New manual invoice</a>
       <select id="inv-status" style="width:auto">
-        <option value="">All</option><option value="issued">Unpaid</option><option value="paid">Paid</option><option value="void">Void</option>
+        <option value="">All</option><option value="unpaid">Unpaid or part paid</option><option value="part_paid">Part paid</option><option value="paid">Paid</option><option value="void">Void</option>
       </select></div>
     <p class="muted">Issue invoices from an accepted quote's page, or use <strong>New manual invoice</strong> for one-off jobs. Each invoice is a frozen copy, so later edits never change it.</p>
     <div class="panel"><div class="table-wrap"><table>
@@ -978,8 +990,8 @@ async function renderInvoicesList() {
         <tr class="clickable" data-id="${i.id}">
           <td>${esc(i.number)}<div class="muted">${esc(i.quote_reference)}</div></td><td>${esc(i.client_name)}</td>
           <td>${esc(INVOICE_KIND_LABELS[i.kind])}</td><td>${esc(formatDate(i.issued_on))}</td>
-          <td>${esc(formatDate(i.due_on))}${i.status === 'issued' && i.due_on < today ? ' <span class="flag">Overdue</span>' : ''}</td>
-          <td class="num">${money(i.amount_due_pence)}</td><td>${badge(i.status === 'issued' ? 'unpaid' : i.status)}</td>
+          <td>${esc(formatDate(nextDue(i)))}${(i.status === 'issued' || i.status === 'part_paid') && nextDue(i) < today ? ' <span class="flag">Overdue</span>' : ''}</td>
+          <td class="num">${money(i.amount_due_pence)}${i.status === 'part_paid' ? `<div class="muted">${money(i.amount_due_pence - i.paid_pence)} owed</div>` : ''}</td><td>${badge(invoiceStatus(i).replace(' ', '_'))}</td>
         </tr>`).join('') : '<tr><td colspan="7" class="muted">No invoices yet.</td></tr>'}</tbody>
     </table></div></div>`;
   const select = document.getElementById('inv-status');
@@ -991,13 +1003,32 @@ async function renderInvoicesList() {
   });
 }
 
+/** Status words for invoices: nothing paid, part paid, paid or void. */
+function invoiceStatus(inv) {
+  return { issued: 'unpaid', part_paid: 'part paid', paid: 'paid', void: 'void' }[inv.status] || inv.status;
+}
+
+/** When the next payment is due: the deposit date until the deposit is covered, then the final date. */
+function nextDue(inv) {
+  return inv.kind === 'scheduled' && inv.paid_pence < inv.deposit_pence ? inv.deposit_due_on : inv.due_on;
+}
+
 async function renderInvoice(invoiceId) {
   const [inv, fa] = await Promise.all([api(`/api/invoices/${invoiceId}`), api('/api/freeagent/status')]);
   const s = inv.snapshot;
-  const overdue = inv.status === 'issued' && inv.due_on < isoToday();
+  const outstanding = inv.amount_due_pence - inv.paid_pence;
+  const open = inv.status === 'issued' || inv.status === 'part_paid';
+  const overdue = open && nextDue(inv) < isoToday();
+  // Suggest the deposit first on a scheduled invoice, then whatever is left.
+  const suggested = inv.kind === 'scheduled' && inv.paid_pence < inv.deposit_pence ? inv.deposit_pence - inv.paid_pence : outstanding;
+  const schedule = inv.kind === 'scheduled' ? `
+      <table style="margin-top:12px"><thead><tr><th>Payment</th><th>Due</th><th class="num">Amount</th></tr></thead><tbody>
+        <tr><td>Deposit</td><td>${esc(formatDate(inv.deposit_due_on))}</td><td class="num">${money(inv.deposit_pence)}</td></tr>
+        <tr><td>Balance</td><td>${esc(formatDate(inv.due_on))}</td><td class="num">${money(inv.amount_due_pence - inv.deposit_pence)}</td></tr>
+      </tbody></table>` : '';
   app.innerHTML = `
     <div class="row">
-      <h1>${esc(inv.number)}</h1>${badge(inv.status === 'issued' ? 'unpaid' : inv.status)}${overdue ? ' <span class="flag">Overdue</span>' : ''}
+      <h1>${esc(inv.number)}</h1>${badge(invoiceStatus(inv).replace(' ', '_'))}${overdue ? ' <span class="flag">Overdue</span>' : ''}
       <span class="spacer"></span>
       <a class="button" href="#/quote/${inv.quote_id}">View quote ${esc(s.quote_reference)}</a>
       ${/^https:\/\/[a-z0-9-]+\.freeagent\.com\//.test(inv.freeagent_url || '') ? `<a class="button" href="${esc(inv.freeagent_url)}" target="_blank" rel="noopener noreferrer">Open in FreeAgent</a>` : ''}
@@ -1009,37 +1040,51 @@ async function renderInvoice(invoiceId) {
       <div class="grid">
         <div><div class="muted">Billed to</div>${esc(s.client_name)}<div class="muted">${esc(s.client_email)}</div></div>
         <div><div class="muted">Event</div>${esc(s.event_type)}<div class="muted">${esc(formatDate(s.event_date))}</div></div>
-        <div><div class="muted">Due</div>${esc(formatDate(inv.due_on))}</div>
-        <div><div class="muted">${inv.kind === 'deposit' ? 'Deposit due' : inv.kind === 'balance' ? 'Balance due' : 'Amount due'}</div>
-          <div style="font: 400 26px/1.2 var(--font-head)">${money(inv.amount_due_pence)}</div>
-          ${inv.kind === 'balance' ? `<div class="muted">Total ${money(inv.total_pence)} less ${money(inv.deposit_paid_pence)} deposit paid</div>` : ''}</div>
+        <div><div class="muted">${open ? 'Next payment due' : 'Due'}</div>${esc(formatDate(open ? nextDue(inv) : inv.due_on))}</div>
+        <div><div class="muted">${inv.status === 'paid' ? 'Paid in full' : 'Still owed'}</div>
+          <div style="font: 400 26px/1.2 var(--font-head)">${money(inv.status === 'paid' ? inv.amount_due_pence : outstanding)}</div>
+          <div class="muted">of ${money(inv.amount_due_pence)}${inv.kind === 'balance' ? ` (total ${money(inv.total_pence)} less ${money(inv.deposit_paid_pence)} deposit)` : ''}</div></div>
       </div>
+      ${schedule}
     </div>
     ${inv.status === 'void' ? '<div class="warn">This invoice is void. Its number won’t be reused.</div>' : `
     <div class="panel">
-      <h2 style="margin-top:0">Payment</h2>
-      ${inv.status === 'paid'
-        ? `<p>Paid on <strong>${esc(formatDate(inv.paid_on))}</strong>.</p><button id="inv-unpaid">Mark as unpaid</button>`
-        : `<div class="row"><label>Paid on<input id="inv-paid-on" type="date" value="${isoToday()}"></label>
-            <button id="inv-paid" class="primary" style="align-self:flex-end">Mark as paid</button></div>`}
-      ${inv.freeagent_status ? '<p class="muted">Record the payment in FreeAgent too (usually by matching the bank transaction).</p>' : ''}
+      <h2 style="margin-top:0">Payments</h2>
+      ${inv.payments.length ? `<table><tbody>${inv.payments.map((p) => `
+        <tr><td>${esc(formatDate(p.paid_on))}</td><td>${esc(p.note)}</td><td class="num">${money(p.amount_pence)}</td>
+          <td class="num"><button data-remove-payment="${p.id}" class="danger" title="Remove this payment">✕</button></td></tr>`).join('')}</tbody></table>`
+        : '<p class="muted">No payments recorded yet.</p>'}
+      ${outstanding > 0 ? `
+        <div class="row" style="margin-top:10px;align-items:flex-end">
+          <label>Amount £<input id="pay-amount" type="number" step="0.01" min="0" value="${toPounds(suggested)}" style="width:130px"></label>
+          <label>Paid on<input id="pay-on" type="date" value="${isoToday()}"></label>
+          <label style="flex:1;min-width:160px">Note (optional)<input id="pay-note" placeholder="${inv.kind === 'scheduled' && inv.paid_pence < inv.deposit_pence ? 'Deposit' : 'Balance'}"></label>
+          <button id="pay-add" class="primary">Record payment</button>
+        </div>` : '<p><strong>Paid in full.</strong></p>'}
+      ${inv.freeagent_status ? '<p class="muted">Record payments in FreeAgent too, usually by matching the bank transaction to this invoice. FreeAgent handles part payments.</p>' : ''}
       <hr style="border:0;border-top:1px solid var(--border);margin:16px 0">
       <button id="inv-void" class="danger admin-only">Void invoice</button>
       <span class="muted admin-only">Use this if it was issued by mistake.${inv.freeagent_status ? ' Cancel it in FreeAgent as well.' : ''}</span>
     </div>`}`;
 
   document.getElementById('inv-pdf').addEventListener('click', (e) => downloadInvoice(invoiceId, e.target));
-  const setStatus = async (status, paidOn) => {
+  const add = document.getElementById('pay-add');
+  if (add) add.addEventListener('click', async () => {
+    add.disabled = true;
     try {
-      await api(`/api/invoices/${invoiceId}/status`, { method: 'POST', json: { status, paid_on: paidOn } });
-      toast(status === 'paid' ? 'Marked as paid' : 'Marked as unpaid');
+      await api(`/api/invoices/${invoiceId}/payments`, { method: 'POST', json: {
+        amount_pence: toPence(document.getElementById('pay-amount').value),
+        paid_on: document.getElementById('pay-on').value,
+        note: document.getElementById('pay-note').value || document.getElementById('pay-note').placeholder,
+      } });
+      toast('Payment recorded');
       route();
-    } catch (err) { toast(err.message, true); }
-  };
-  const paid = document.getElementById('inv-paid');
-  if (paid) paid.addEventListener('click', () => setStatus('paid', document.getElementById('inv-paid-on').value));
-  const unpaid = document.getElementById('inv-unpaid');
-  if (unpaid) unpaid.addEventListener('click', () => setStatus('issued', ''));
+    } catch (err) { toast(err.message, true); add.disabled = false; }
+  });
+  app.querySelectorAll('[data-remove-payment]').forEach((b) => b.addEventListener('click', async () => {
+    if (!confirm('Remove this payment?')) return;
+    try { await api(`/api/invoices/${invoiceId}/payments/${b.dataset.removePayment}`, { method: 'DELETE' }); toast('Payment removed'); route(); } catch (err) { toast(err.message, true); }
+  }));
   const voidBtn = document.getElementById('inv-void');
   if (voidBtn) voidBtn.addEventListener('click', async () => {
     if (!confirm(`Void ${inv.number}? It stays on record as void and the number isn't reused. This can't be undone.`)) return;

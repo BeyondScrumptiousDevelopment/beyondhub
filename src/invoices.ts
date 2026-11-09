@@ -3,7 +3,8 @@ import type { LineItem } from './pricing';
 import { computeTotals } from './pricing';
 import { UserError } from './security';
 
-export const INVOICE_KINDS = ['deposit', 'balance', 'full'] as const;
+/** 'scheduled' is one invoice for the full amount with a deposit due first and the balance due later. */
+export const INVOICE_KINDS = ['deposit', 'balance', 'full', 'scheduled'] as const;
 export type InvoiceKind = (typeof INVOICE_KINDS)[number];
 
 /** What an invoice shows about its quote, frozen when the invoice is issued. */
@@ -33,7 +34,7 @@ export interface InvoiceRow {
   number: string;
   quote_id: number;
   kind: InvoiceKind;
-  status: 'issued' | 'paid' | 'void';
+  status: 'issued' | 'part_paid' | 'paid' | 'void';
   issued_on: string;
   due_on: string;
   paid_on: string;
@@ -49,6 +50,9 @@ export interface InvoiceRow {
   created_at: string;
   updated_by: string | null;
   updated_at: string;
+  deposit_pence: number;
+  deposit_due_on: string;
+  paid_pence: number;
 }
 
 export function snapshotQuote(q: QuoteRow): InvoiceSnapshot {
@@ -135,6 +139,8 @@ export interface NewInvoice {
   /** Balance invoices only: what was already paid, and when. */
   deposit_paid_pence?: number;
   deposit_paid_on?: string;
+  /** Scheduled invoices only: when the deposit part is due (due_on is the final payment). */
+  deposit_due_on?: string;
 }
 
 /** Works out what a balance invoice should deduct: a paid deposit invoice for the same quote, if there is one. */
@@ -162,20 +168,33 @@ export async function createInvoice(
   if (!snapshot.client_name.trim()) throw new UserError("Add the client's name to the quote first.");
   if (input.due_on < input.issued_on) throw new UserError("The due date can't be before the invoice date.");
 
-  // One deposit and one balance invoice per quote, or a single full invoice (void ones don't count).
+  // One deposit and one balance invoice per quote, or a single full or scheduled invoice (void ones don't count).
   const { results: existing } = await db
     .prepare("SELECT kind FROM invoices WHERE quote_id = ? AND status <> 'void'")
     .bind(quote.id)
     .all<{ kind: InvoiceKind }>();
   const kinds = new Set(existing.map((r) => r.kind));
-  if (kinds.has('full') || kinds.has(input.kind) || (input.kind === 'full' && kinds.size > 0)) {
+  const single = (k: InvoiceKind) => k === 'full' || k === 'scheduled';
+  if (kinds.has('full') || kinds.has('scheduled') || kinds.has(input.kind) || (single(input.kind) && kinds.size > 0)) {
     throw new UserError('This quote already has that invoice. Void the old one first if it needs reissuing.', 409);
   }
 
   let amountDue: number;
   let depositPaid = 0;
   let depositPaidOn = '';
-  if (input.kind === 'deposit') {
+  let depositPart = 0;
+  let depositDueOn = '';
+  if (input.kind === 'scheduled') {
+    if (snapshot.deposit_pence <= 0 || snapshot.deposit_pence >= snapshot.total_pence) {
+      throw new UserError('This quote has no separate deposit. Issue a full invoice instead.');
+    }
+    depositPart = snapshot.deposit_pence;
+    depositDueOn = input.deposit_due_on || input.issued_on;
+    if (depositDueOn < input.issued_on || depositDueOn > input.due_on) {
+      throw new UserError('The deposit must be due between the invoice date and the final payment date.');
+    }
+    amountDue = snapshot.total_pence;
+  } else if (input.kind === 'deposit') {
     if (snapshot.deposit_pence <= 0 || snapshot.deposit_pence >= snapshot.total_pence) {
       throw new UserError('This quote has no separate deposit. Issue a full invoice instead.');
     }
@@ -198,12 +217,12 @@ export async function createInvoice(
       const row = await db
         .prepare(
           `INSERT INTO invoices (number, quote_id, kind, issued_on, due_on, total_pence, deposit_paid_pence, deposit_paid_on,
-             amount_due_pence, snapshot, created_by, updated_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+             amount_due_pence, deposit_pence, deposit_due_on, snapshot, created_by, updated_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
         )
         .bind(
           number, quote.id, input.kind, input.issued_on, input.due_on, snapshot.total_pence, depositPaid, depositPaidOn,
-          amountDue, JSON.stringify(snapshot), by, by,
+          amountDue, depositPart, depositDueOn, JSON.stringify(snapshot), by, by,
         )
         .first<{ id: number }>();
       await setNumbering(db, { ...seq, next: seq.next + 1 });
@@ -217,3 +236,37 @@ export async function createInvoice(
 export function invoiceToJson(row: InvoiceRow) {
   return { ...row, snapshot: JSON.parse(row.snapshot) as InvoiceSnapshot };
 }
+
+// --- Payments (an invoice can be paid in parts) ---------------------------------------
+
+export interface PaymentRow {
+  id: number;
+  invoice_id: number;
+  amount_pence: number;
+  paid_on: string;
+  note: string;
+  created_by: string | null;
+  created_at: string;
+}
+
+/** Recomputes what's been paid and the invoice's status from its recorded payments. */
+export async function refreshPaid(db: D1Database, invoiceId: number): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE invoices SET
+         paid_pence = (SELECT COALESCE(SUM(amount_pence), 0) FROM invoice_payments WHERE invoice_id = invoices.id),
+         status = CASE
+           WHEN status = 'void' THEN 'void'
+           WHEN (SELECT COALESCE(SUM(amount_pence), 0) FROM invoice_payments WHERE invoice_id = invoices.id) >= amount_due_pence THEN 'paid'
+           WHEN (SELECT COUNT(*) FROM invoice_payments WHERE invoice_id = invoices.id) > 0 THEN 'part_paid'
+           ELSE 'issued' END,
+         paid_on = COALESCE((SELECT MAX(paid_on) FROM invoice_payments WHERE invoice_id = invoices.id), ''),
+         updated_at = datetime('now')
+       WHERE id = ?`,
+    )
+    .bind(invoiceId)
+    .run();
+}
+
+/** When the next payment is due: the deposit date until the deposit is covered, then the final date. */
+export const NEXT_DUE_SQL = `CASE WHEN i.kind = 'scheduled' AND i.paid_pence < i.deposit_pence THEN i.deposit_due_on ELSE i.due_on END`;

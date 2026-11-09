@@ -375,22 +375,38 @@ async function downloadInvoiceDocument(inv, settings) {
   const s = inv.snapshot;
   const totals = [...subtotalRows(s), ['Total', docMoney(inv.total_pence)]];
   let grand;
-  let items = lineItemsForDoc(s.line_items);
-  if (inv.kind === 'deposit') {
-    grand = ['Deposit due', docMoney(inv.amount_due_pence)];
+  const items = lineItemsForDoc(s.line_items);
+  const paid = Number(inv.paid_pence || 0);
+  const outstanding = inv.amount_due_pence - paid;
+  const paidRow = () => totals.push(['Paid so far', docMoney(-paid), inv.paid_on ? docDate(inv.paid_on) : '']);
+  if (inv.kind === 'scheduled') {
+    // One invoice for the total, with the deposit due first and the balance later.
+    totals.push([`Deposit due ${docDate(inv.deposit_due_on)}`, docMoney(inv.deposit_pence)]);
+    totals.push([`Balance due ${docDate(inv.due_on)}`, docMoney(inv.amount_due_pence - inv.deposit_pence)]);
+    if (paid) paidRow();
+    grand = outstanding <= 0 ? ['Paid in full', docMoney(0)]
+      : paid ? ['Balance outstanding', docMoney(outstanding)] : ['Total due', docMoney(inv.amount_due_pence)];
+  } else if (inv.kind === 'deposit') {
+    if (paid) paidRow();
+    grand = outstanding <= 0 ? ['Paid in full', docMoney(0)] : ['Deposit due', docMoney(outstanding)];
   } else if (inv.kind === 'balance') {
     totals.push(['Deposit paid', docMoney(-inv.deposit_paid_pence), inv.deposit_paid_on ? docDate(inv.deposit_paid_on) : '']);
-    grand = ['Balance due', docMoney(inv.amount_due_pence)];
+    if (paid) paidRow();
+    grand = outstanding <= 0 ? ['Paid in full', docMoney(0)] : ['Balance due', docMoney(outstanding)];
   } else {
-    totals.pop();
-    grand = ['Amount due', docMoney(inv.amount_due_pence)];
+    if (paid) paidRow(); else totals.pop();
+    grand = outstanding <= 0 ? ['Paid in full', docMoney(0)] : [paid ? 'Balance outstanding' : 'Amount due', docMoney(outstanding)];
   }
   const daysBefore = s.event_date ? daysBetween(inv.due_on, s.event_date) : null;
+  const beforeEvent = daysBefore !== null && daysBefore > 0 ? ` (${daysBefore} day${daysBefore === 1 ? '' : 's'} before your event)` : '';
   const what = inv.kind === 'deposit' ? 'Deposit' : inv.kind === 'balance' ? 'Balance' : 'Payment';
   const goodToKnow = ['Please use the invoice number as your payment reference'];
-  if (inv.kind === 'deposit') {
+  if (inv.kind === 'scheduled') {
+    goodToKnow.push(`A deposit of ${docMoney(inv.deposit_pence)} secures your date and is due by ${docDate(inv.deposit_due_on)}`);
+    goodToKnow.push(`The balance of ${docMoney(inv.amount_due_pence - inv.deposit_pence)} is due by ${docDate(inv.due_on)}${beforeEvent}`);
+  } else if (inv.kind === 'deposit') {
     goodToKnow.push(`Your deposit secures your date${s.event_date ? ` of ${docDate(s.event_date)}` : ''}`);
-  } else if (daysBefore !== null && daysBefore > 0) {
+  } else if (beforeEvent) {
     goodToKnow.push(`${what} due ${daysBefore} day${daysBefore === 1 ? '' : 's'} before your event`);
   } else {
     goodToKnow.push(`${what} due by ${docDate(inv.due_on)}`);
